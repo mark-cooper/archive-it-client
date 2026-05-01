@@ -1,10 +1,10 @@
 # archive-it-client
 
-Async Rust client for Archive-It's partner API and WASAPI.
+Rust client for Archive-It's partner API and WASAPI.
 
 ## Overview
 
-There are three clients, each scoped to what its endpoints actually expose under that auth state:
+There are three clients, each scoped to what its endpoints expose under that auth state:
 
 ```rust
 use archive_it_client::{PageOpts, PartnerClient, PublicClient, WasapiClient};
