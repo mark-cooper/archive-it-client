@@ -1,4 +1,4 @@
-use archive_it_client::WasapiClient;
+use archive_it_client::{WasapiClient, WebdataQuery};
 use futures::{StreamExt, TryStreamExt};
 
 #[tokio::main]
@@ -10,13 +10,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = WasapiClient::new(user, pass)?;
     let collection_id: u64 = 4472;
+    let query = WebdataQuery {
+        collection: Some(collection_id),
+        ..Default::default()
+    };
 
     // per-page call when you want pagination metadata (e.g. total count)
-    let page = client.list_webdata(collection_id).await?;
+    let page = client.list_webdata(&query).await?;
     println!("collection {}: {} files total", collection_id, page.count);
 
     // streaming when you just want to iterate
-    let sample: Vec<_> = client.webdata(collection_id).take(3).try_collect().await?;
+    let sample: Vec<_> = client.webdata(query).take(3).try_collect().await?;
     println!("\nfirst 3 files:");
     for f in &sample {
         println!("  {} ({} bytes)", f.filename, f.size);

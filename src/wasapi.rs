@@ -24,19 +24,8 @@ impl WasapiClient {
         })
     }
 
-    pub async fn list_webdata(&self, collection_id: u64) -> Result<Page<WasapiFile>, Error> {
-        #[derive(Serialize)]
-        struct Q {
-            collection: u64,
-        }
-        self.transport
-            .get_json(
-                "webdata",
-                &Q {
-                    collection: collection_id,
-                },
-            )
-            .await
+    pub async fn list_webdata(&self, query: &WebdataQuery) -> Result<Page<WasapiFile>, Error> {
+        self.transport.get_json("webdata", query).await
     }
 
     pub async fn list_webdata_next(
@@ -51,10 +40,10 @@ impl WasapiClient {
 
     pub fn webdata(
         &self,
-        collection_id: u64,
+        query: WebdataQuery,
     ) -> impl Stream<Item = Result<WasapiFile, Error>> + Send + '_ {
         async_stream::try_stream! {
-            let mut page = self.list_webdata(collection_id).await?;
+            let mut page = self.list_webdata(&query).await?;
             loop {
                 let files = std::mem::take(&mut page.files);
                 for f in files { yield f; }
@@ -65,4 +54,28 @@ impl WasapiClient {
             }
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct WebdataQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filetype: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crawl: Option<u64>,
+    #[serde(rename = "crawl-time-after", skip_serializing_if = "Option::is_none")]
+    pub crawl_time_after: Option<String>,
+    #[serde(rename = "crawl-time-before", skip_serializing_if = "Option::is_none")]
+    pub crawl_time_before: Option<String>,
+    #[serde(rename = "crawl-start-after", skip_serializing_if = "Option::is_none")]
+    pub crawl_start_after: Option<String>,
+    #[serde(rename = "crawl-start-before", skip_serializing_if = "Option::is_none")]
+    pub crawl_start_before: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
 }
