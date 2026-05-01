@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = PartnerClient::new(user, pass)?;
 
-    let me = client.self_account().await?;
+    let me = client.my_account().await?;
     println!(
         "authenticated as account {} ({})",
         me.id, me.organization_name

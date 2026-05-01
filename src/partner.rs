@@ -27,7 +27,7 @@ impl PartnerClient {
         })
     }
 
-    pub async fn self_account(&self) -> Result<Account, Error> {
+    pub async fn my_account(&self) -> Result<Account, Error> {
         let accounts: Vec<Account> = self.transport.get_json("account", &()).await?;
         accounts.into_iter().next().ok_or(Error::Empty)
     }
@@ -51,7 +51,7 @@ impl PartnerClient {
 
     async fn cached_self_id(&self) -> Result<u64, Error> {
         self.self_id
-            .get_or_try_init(|| async { self.self_account().await.map(|a| a.id) })
+            .get_or_try_init(|| async { self.my_account().await.map(|a| a.id) })
             .await
             .copied()
     }

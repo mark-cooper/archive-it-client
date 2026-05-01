@@ -68,7 +68,7 @@ async fn partner_attaches_basic_auth() {
         .await;
 
     let client = PartnerClient::with_config("user", "pass", config(&server)).unwrap();
-    let acct = client.self_account().await.unwrap();
+    let acct = client.my_account().await.unwrap();
 
     assert_eq!(acct.id, 0);
 }
