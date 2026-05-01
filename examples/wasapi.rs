@@ -1,4 +1,4 @@
-use ait_client::WasapiClient;
+use archive_it_client::WasapiClient;
 use futures::{StreamExt, TryStreamExt};
 
 #[tokio::main]

@@ -1,4 +1,4 @@
-use ait_client::PublicClient;
+use archive_it_client::PublicClient;
 use futures::{StreamExt, TryStreamExt};
 
 #[tokio::main]

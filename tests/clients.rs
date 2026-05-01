@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ait_client::{Config, Error, PageOpts, PartnerClient, PublicClient, WasapiClient};
+use archive_it_client::{Config, Error, PageOpts, PartnerClient, PublicClient, WasapiClient};
 use serde_json::json;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};

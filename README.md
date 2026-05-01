@@ -1,4 +1,4 @@
-# ait-client
+# archive-it-client
 
 Async Rust client for Archive-It's partner API and WASAPI.
 
@@ -7,7 +7,7 @@ Async Rust client for Archive-It's partner API and WASAPI.
 There are three clients, each scoped to what its endpoints actually expose under that auth state:
 
 ```rust
-use ait_client::{PageOpts, PartnerClient, PublicClient, WasapiClient};
+use archive_it_client::{PageOpts, PartnerClient, PublicClient, WasapiClient};
 
 // public — no auth, partner registry + public collections
 let public = PublicClient::new()?;
@@ -28,7 +28,7 @@ Timeouts and retries (default: 30s, 3 attempts, 250ms exponential backoff; retri
 
 ```rust
 use std::time::Duration;
-use ait_client::Config;
+use archive_it_client::Config;
 
 let mut cfg = Config::api();
 cfg.timeout = Duration::from_secs(10);

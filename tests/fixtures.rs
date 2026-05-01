@@ -1,6 +1,6 @@
-use ait_client::models::partner::{Account, Collection};
-use ait_client::models::public::{PublicAccount, PublicCollection};
-use ait_client::models::wasapi::{Page, WasapiFile};
+use archive_it_client::models::partner::{Account, Collection};
+use archive_it_client::models::public::{PublicAccount, PublicCollection};
+use archive_it_client::models::wasapi::{Page, WasapiFile};
 
 #[test]
 fn deser_public_account() {
