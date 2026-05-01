@@ -1,32 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${AITU:?AITU must be set}"
-: "${AITP:?AITP must be set}"
+: "${ARCHIVE_IT_USERNAME:?ARCHIVE_IT_USERNAME must be set}"
+: "${ARCHIVE_IT_PASSWORD:?ARCHIVE_IT_PASSWORD must be set}"
 
 cd "$(dirname "$0")"
 mkdir -p fixtures fixtures.local
 
 # Step 1: fetch raw responses into fixtures.local/ (gitignored).
-curl -fsSL "https://partner.archive-it.org/api/" \
+curl -fsSL \
+  "https://partner.archive-it.org/api/" \
   | jq > fixtures.local/api.json
-curl -fsSL "https://partner.archive-it.org/api/account" \
+curl -fsSL \
+  "https://partner.archive-it.org/api/account" \
   | jq > fixtures.local/api_accounts_public.json
-curl -fsSL -u "$AITU:$AITP" "https://partner.archive-it.org/api/account" \
+curl -fsSL -u "$ARCHIVE_IT_USERNAME:$ARCHIVE_IT_PASSWORD" \
+  "https://partner.archive-it.org/api/account" \
   | jq > fixtures.local/api_accounts_authenticated.json
-curl -fsSL "https://partner.archive-it.org/api/account/484" \
+curl -fsSL \
+  "https://partner.archive-it.org/api/account/484" \
   | jq > fixtures.local/api_account_public.json
-curl -fsSL -u "$AITU:$AITP" "https://partner.archive-it.org/api/account/484" \
+curl -fsSL -u "$ARCHIVE_IT_USERNAME:$ARCHIVE_IT_PASSWORD" \
+  "https://partner.archive-it.org/api/account/484" \
   | jq > fixtures.local/api_account_authenticated.json
-curl -fsSL "https://partner.archive-it.org/api/collection?account=484&limit=100" \
+curl -fsSL \
+  "https://partner.archive-it.org/api/collection?account=484&limit=100" \
   | jq > fixtures.local/api_collections_public.json
-curl -fsSL -u "$AITU:$AITP" "https://partner.archive-it.org/api/collection?account=484&limit=100" \
+curl -fsSL -u "$ARCHIVE_IT_USERNAME:$ARCHIVE_IT_PASSWORD" \
+  "https://partner.archive-it.org/api/collection?account=484&limit=100" \
   | jq > fixtures.local/api_collections_authenticated.json
-curl -fsSL "https://partner.archive-it.org/api/collection/2135" \
+curl -fsSL \
+  "https://partner.archive-it.org/api/collection/2135" \
   | jq > fixtures.local/api_collection_public.json
-curl -fsSL -u "$AITU:$AITP" "https://partner.archive-it.org/api/collection/2135" \
+curl -fsSL -u "$ARCHIVE_IT_USERNAME:$ARCHIVE_IT_PASSWORD" \
+  "https://partner.archive-it.org/api/collection/2135" \
   | jq > fixtures.local/api_collection_authenticated.json
-curl -fsSL -u "$AITU:$AITP" "https://partner.archive-it.org/wasapi/v1/webdata?collection=4472" \
+curl -fsSL -u "$ARCHIVE_IT_USERNAME:$ARCHIVE_IT_PASSWORD" \
+  "https://partner.archive-it.org/wasapi/v1/webdata?collection=4472" \
   | jq > fixtures.local/wasapi_collection.json
 
 # Step 2: derive committed fake fixtures in fixtures/ from local raw data.

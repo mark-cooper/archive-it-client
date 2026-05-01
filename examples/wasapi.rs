@@ -3,8 +3,10 @@ use futures::{StreamExt, TryStreamExt};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let user = std::env::var("AITU").expect("AITU env var must be set");
-    let pass = std::env::var("AITP").expect("AITP env var must be set");
+    let user =
+        std::env::var("ARCHIVE_IT_USERNAME").expect("ARCHIVE_IT_USERNAME env var must be set");
+    let pass =
+        std::env::var("ARCHIVE_IT_PASSWORD").expect("ARCHIVE_IT_PASSWORD env var must be set");
 
     let client = WasapiClient::new(user, pass)?;
     let collection_id: u64 = 4472;
