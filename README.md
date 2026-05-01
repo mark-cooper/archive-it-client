@@ -6,34 +6,53 @@ Rust client for Archive-It's partner API and WASAPI.
 
 There are three clients, each scoped to what its endpoints expose under that auth state:
 
-```rust
-use archive_it_client::{PageOpts, PartnerClient, PublicClient, WasapiClient};
+```rust,no_run
+use archive_it_client::{PageOpts, PartnerClient, PublicClient, WasapiClient, WebdataQuery};
 
-// public — no auth, partner registry + public collections
-let public = PublicClient::new()?;
-let accounts = public.list_accounts(PageOpts::default()).await?;
-let collection = public.get_collection(2135).await?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = "user";
+    let pass = "pass";
 
-// partner — auth scopes every call to your own account
-let partner = PartnerClient::new(user, pass)?;
-let me = partner.self_account().await?;
-let mine = partner.list_collections(PageOpts::default()).await?;
+    // public — no auth, partner registry + public collections
+    let public = PublicClient::new()?;
+    let accounts = public.list_accounts(PageOpts::default()).await?;
+    let collection = public.get_collection(2135).await?;
 
-// wasapi — WARC manifests for a collection
-let wasapi = WasapiClient::new(user, pass)?;
-let page = wasapi.list_webdata(4472).await?;
+    // partner — auth scopes every call to your own account
+    let partner = PartnerClient::new(user, pass)?;
+    let me = partner.my_account().await?;
+    let mine = partner.list_collections(PageOpts::default()).await?;
+
+    // wasapi — WARC manifests for a collection
+    let wasapi = WasapiClient::new(user, pass)?;
+    let query = WebdataQuery {
+        collection: Some(4472),
+        ..Default::default()
+    };
+    let page = wasapi.list_webdata(&query).await?;
+
+    Ok(())
+}
 ```
 
 Timeouts and retries (default: 30s, 3 attempts, 250ms exponential backoff; retries on 5xx, 429, timeouts, and connection errors) are configured via `Config`:
 
-```rust
+```rust,no_run
 use std::time::Duration;
-use archive_it_client::Config;
+use archive_it_client::{Config, PartnerClient};
 
-let mut cfg = Config::api();
-cfg.timeout = Duration::from_secs(10);
-cfg.max_attempts = 5;
-let client = PartnerClient::with_config(user, pass, cfg)?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = "user";
+    let pass = "pass";
+
+    let mut cfg = Config::api();
+    cfg.timeout = Duration::from_secs(10);
+    cfg.max_attempts = 5;
+    let client = PartnerClient::with_config(user, pass, cfg)?;
+
+    Ok(())
+}
 ```
 
 ## Pagination
@@ -47,15 +66,31 @@ behind a uniform `Stream<Item = Result<T, Error>>`.
 Each list endpoint has a streaming variant. Pages are fetched lazily as items
 are pulled; dropping the stream stops mid-traversal:
 
-```rust
+```rust,no_run
+use archive_it_client::{PartnerClient, PublicClient, WasapiClient, WebdataQuery};
 use futures::TryStreamExt;  // for try_collect / try_next / try_filter / ...
 
-let all: Vec<_> = public.accounts().try_collect().await?;
-let mine: Vec<_> = partner.collections().try_collect().await?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = "user";
+    let pass = "pass";
+    let public = PublicClient::new()?;
+    let partner = PartnerClient::new(user, pass)?;
+    let wasapi = WasapiClient::new(user, pass)?;
 
-let mut files = Box::pin(wasapi.webdata(4472));
-while let Some(file) = files.try_next().await? {
-    // process one file at a time
+    let all: Vec<_> = public.accounts().try_collect().await?;
+    let mine: Vec<_> = partner.collections().try_collect().await?;
+
+    let query = WebdataQuery {
+        collection: Some(4472),
+        ..Default::default()
+    };
+    let mut files = Box::pin(wasapi.webdata(query));
+    while let Some(file) = files.try_next().await? {
+        // process one file at a time
+    }
+
+    Ok(())
 }
 ```
 
@@ -65,7 +100,7 @@ The streaming methods are:
 | --- | --- |
 | `PublicClient` | `accounts()`, `collections(account_id: Option<u64>)` |
 | `PartnerClient` | `collections()` |
-| `WasapiClient` | `webdata(collection_id)` |
+| `WasapiClient` | `webdata(query: WebdataQuery)` |
 
 Internally they fetch 100 items per request.
 
@@ -83,21 +118,35 @@ futures = "0.3"           # or tokio-stream = "0.1"
 When you want to control page size or read pagination metadata
 (WASAPI's `count`, `next`), use the lower-level methods:
 
-```rust
-// /api — caller passes limit/offset, gets a Vec
-let batch = public
-    .list_accounts(PageOpts { limit: Some(50), offset: Some(0) })
-    .await?;
+```rust,no_run
+use archive_it_client::{PageOpts, PublicClient, WasapiClient, WebdataQuery};
 
-// wasapi — server-driven cursor; follow `next` until exhausted
-let mut page = wasapi.list_webdata(4472).await?;
-println!("{} files total", page.count);
-loop {
-    for file in &page.files { /* ... */ }
-    match wasapi.list_webdata_next(&page).await? {
-        Some(next) => page = next,
-        None => break,
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let public = PublicClient::new()?;
+    let wasapi = WasapiClient::new("user", "pass")?;
+
+    // /api — caller passes limit/offset, gets a Vec
+    let batch = public
+        .list_accounts(PageOpts { limit: Some(50), offset: Some(0) })
+        .await?;
+
+    // wasapi — server-driven cursor; follow `next` until exhausted
+    let query = WebdataQuery {
+        collection: Some(4472),
+        ..Default::default()
+    };
+    let mut page = wasapi.list_webdata(&query).await?;
+    println!("{} files total", page.count);
+    loop {
+        for file in &page.files { /* ... */ }
+        match wasapi.list_webdata_next(&page).await? {
+            Some(next) => page = next,
+            None => break,
+        }
     }
+
+    Ok(())
 }
 ```
 
