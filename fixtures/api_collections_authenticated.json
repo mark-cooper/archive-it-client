@@ -1,0 +1,31 @@
+[
+  {
+    "account": 0,
+    "created_by": "FAKE",
+    "created_date": "1970-01-01T00:00:00Z",
+    "custom_user_agent": null,
+    "deleted": false,
+    "id": 0,
+    "image": null,
+    "last_crawl_date": "1970-01-01T00:00:00Z",
+    "last_updated_by": "FAKE",
+    "last_updated_date": "1970-01-01T00:00:00Z",
+    "metadata": {
+      "fake_metadata": [
+        {
+          "id": 0,
+          "value": "FAKE"
+        }
+      ]
+    },
+    "name": "Fake Name",
+    "num_active_seeds": 0,
+    "num_inactive_seeds": 0,
+    "oai_exported": false,
+    "private_access_token": "FAKE_TOKEN",
+    "publicly_visible": false,
+    "state": "ACTIVE",
+    "topics": "FAKE",
+    "total_warc_bytes": 0
+  }
+]

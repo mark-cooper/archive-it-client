@@ -1,0 +1,27 @@
+{
+  "count": 1,
+  "next": "FAKE",
+  "previous": null,
+  "files": [
+    {
+      "filename": "ARCHIVEIT-FAKE-19700101000000-00000-fake.warc.gz",
+      "filetype": "warc",
+      "checksums": {
+        "sha1": "FAKE_SHA1",
+        "md5": "FAKE_MD5"
+      },
+      "account": 0,
+      "size": 0,
+      "collection": 0,
+      "crawl": 0,
+      "crawl-time": "1970-01-01T00:00:00Z",
+      "crawl-start": "1970-01-01T00:00:00Z",
+      "store-time": "1970-01-01T00:00:00Z",
+      "locations": [
+        "https://example.invalid/fake"
+      ]
+    }
+  ],
+  "includes-extra": false,
+  "request-url": "https://example.invalid/fake"
+}

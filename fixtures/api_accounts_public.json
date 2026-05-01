@@ -1,0 +1,10 @@
+[
+  {
+    "id": 0,
+    "organization_name": "Fake Organization",
+    "partner_description": "Fake description.",
+    "logo_blob": 0,
+    "partner_url": "https://example.invalid/fake",
+    "custom_crawl_schedules_visible": false
+  }
+]
