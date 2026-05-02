@@ -1,4 +1,7 @@
+use std::pin::pin;
+
 use futures_core::Stream;
+use futures_util::TryStreamExt;
 use tokio::sync::OnceCell;
 
 use crate::http::{Transport, paginated};
@@ -43,10 +46,14 @@ impl PartnerClient {
         paginated(move |opts| self.list_collections(opts))
     }
 
-    pub async fn get_collection(&self, id: u64) -> Result<Collection, Error> {
-        self.transport
-            .get_json(&format!("collection/{id}"), &())
-            .await
+    pub async fn get_collection(&self, id: u64) -> Result<Option<Collection>, Error> {
+        let mut stream = pin!(self.collections());
+        while let Some(c) = stream.try_next().await? {
+            if c.id == id {
+                return Ok(Some(c));
+            }
+        }
+        Ok(None)
     }
 
     async fn cached_self_id(&self) -> Result<u64, Error> {

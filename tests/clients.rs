@@ -103,6 +103,52 @@ async fn partner_caches_self_id_across_list_calls() {
 }
 
 #[tokio::test]
+async fn partner_get_collection_returns_some_when_in_user_list() {
+    let server = MockServer::start().await;
+    let collection: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/api_collection_authenticated.json"
+    ))
+    .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([full_account()])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/collection"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([collection])))
+        .mount(&server)
+        .await;
+
+    let client = PartnerClient::with_config("u", "p", config(&server)).unwrap();
+    let found = client.get_collection(0).await.unwrap();
+
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().id, 0);
+}
+
+#[tokio::test]
+async fn partner_get_collection_returns_none_when_not_in_user_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/account"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([full_account()])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/collection"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = PartnerClient::with_config("u", "p", config(&server)).unwrap();
+    let found = client.get_collection(999).await.unwrap();
+
+    assert!(found.is_none());
+}
+
+#[tokio::test]
 async fn not_found_maps_to_error_and_does_not_retry() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
