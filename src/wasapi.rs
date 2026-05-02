@@ -45,27 +45,9 @@ impl WasapiClient {
     }
 
     pub async fn download(&self, file: WasapiFile, path: impl AsRef<Path>) -> Result<(), Error> {
-        let (url, mut response) = self.download_response(&file).await?;
-        let path = path.as_ref();
-        let partial_path = partial_path(path)?;
-        let mut out = tokio::fs::File::create(&partial_path).await?;
-        let mut hasher = Sha1::new();
-
-        while let Some(chunk) = response.chunk().await? {
-            hasher.update(&chunk);
-            out.write_all(&chunk).await?;
-        }
-
-        verify_and_finalize(
-            out,
-            &partial_path,
-            path,
-            hasher,
-            file.size,
-            &file.checksums.sha1,
-            &url,
-        )
-        .await
+        let mut stream = pin!(self.download_with_progress(file, path));
+        while stream.try_next().await?.is_some() {}
+        Ok(())
     }
 
     pub fn download_collection(
@@ -83,43 +65,10 @@ impl WasapiClient {
                     yield DownloadOutcome::Skipped { file, path };
                     continue;
                 }
-
-                let url = self.primary_location_url(&file)?;
-                let mut response = self.transport.get_response(url.clone()).await?;
-                let partial_path = partial_path(&path)?;
-                let mut out = tokio::fs::File::create(&partial_path).await?;
-                let mut hasher = Sha1::new();
-                let mut received: u64 = 0;
-                let mut last_progress: Option<Instant> = None;
-
-                while let Some(chunk) = response.chunk().await? {
-                    hasher.update(&chunk);
-                    out.write_all(&chunk).await?;
-                    received += chunk.len() as u64;
-                    let emit = match last_progress {
-                        None => true,
-                        Some(t) => t.elapsed() >= PROGRESS_INTERVAL,
-                    };
-                    if emit {
-                        yield DownloadOutcome::Progress {
-                            file: file.clone(),
-                            received,
-                            total: file.size,
-                        };
-                        last_progress = Some(Instant::now());
-                    }
+                let mut inner = pin!(self.download_with_progress(file, path));
+                while let Some(event) = inner.try_next().await? {
+                    yield event;
                 }
-
-                verify_and_finalize(
-                    out,
-                    &partial_path,
-                    &path,
-                    hasher,
-                    file.size,
-                    &file.checksums.sha1,
-                    &url,
-                ).await?;
-                yield DownloadOutcome::Downloaded { file, path };
             }
         }
     }
@@ -130,6 +79,52 @@ impl WasapiClient {
     ) -> Result<impl Stream<Item = Result<Bytes, Error>> + Send + 'static, Error> {
         let (_, response) = self.download_response(&file).await?;
         Ok(response.bytes_stream().map_err(Error::from))
+    }
+
+    pub fn download_with_progress(
+        &self,
+        file: WasapiFile,
+        path: impl AsRef<Path>,
+    ) -> impl Stream<Item = Result<DownloadOutcome, Error>> + Send + '_ {
+        let path = path.as_ref().to_path_buf();
+        async_stream::try_stream! {
+            let url = self.primary_location_url(&file)?;
+            let mut response = self.transport.get_response(url.clone()).await?;
+            let partial_path = partial_path(&path)?;
+            let mut out = tokio::fs::File::create(&partial_path).await?;
+            let mut hasher = Sha1::new();
+            let mut received: u64 = 0;
+            let mut last_progress: Option<Instant> = None;
+
+            while let Some(chunk) = response.chunk().await? {
+                hasher.update(&chunk);
+                out.write_all(&chunk).await?;
+                received += chunk.len() as u64;
+                let emit = match last_progress {
+                    None => true,
+                    Some(t) => t.elapsed() >= PROGRESS_INTERVAL,
+                };
+                if emit {
+                    yield DownloadOutcome::Progress {
+                        file: file.clone(),
+                        received,
+                        total: file.size,
+                    };
+                    last_progress = Some(Instant::now());
+                }
+            }
+
+            verify_and_finalize(
+                out,
+                &partial_path,
+                &path,
+                hasher,
+                file.size,
+                &file.checksums.sha1,
+                &url,
+            ).await?;
+            yield DownloadOutcome::Downloaded { file, path };
+        }
     }
 
     pub async fn list_webdata(&self, query: &WebdataQuery) -> Result<Page<WasapiFile>, Error> {
