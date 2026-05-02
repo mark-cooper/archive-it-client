@@ -43,6 +43,7 @@ impl Config {
     pub fn wasapi() -> Self {
         Self {
             base_url: "https://partner.archive-it.org/wasapi/v1/".into(),
+            timeout: Duration::from_secs(120),
             ..Self::api()
         }
     }
