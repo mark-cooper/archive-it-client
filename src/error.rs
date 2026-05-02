@@ -15,6 +15,8 @@ pub enum Error {
     Empty,
     #[error("download path has no file name: {}", .path.display())]
     InvalidDownloadPath { path: PathBuf },
+    #[error("invalid range response for {url}: {details}")]
+    InvalidRangeResponse { url: String, details: String },
     #[error("I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error("resource not found: {0}")]

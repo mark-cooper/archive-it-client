@@ -64,6 +64,14 @@ impl Transport {
             .await
     }
 
+    pub(crate) fn backoff(&self) -> Duration {
+        self.backoff
+    }
+
+    pub(crate) fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
     async fn get_response_with_query<Q>(
         &self,
         client: &reqwest::Client,
@@ -148,7 +156,7 @@ where
     }
 }
 
-fn is_retryable(err: &Error) -> bool {
+pub(crate) fn is_retryable(err: &Error) -> bool {
     match err {
         Error::Request(e) => e.is_timeout() || e.is_connect(),
         Error::Status(s) => s.is_server_error() || *s == reqwest::StatusCode::TOO_MANY_REQUESTS,

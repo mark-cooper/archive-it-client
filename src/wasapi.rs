@@ -10,7 +10,7 @@ use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
-use crate::http::Transport;
+use crate::http::{Transport, is_retryable};
 use crate::models::wasapi::{Page, WasapiFile};
 use crate::{Config, Error};
 
@@ -91,7 +91,7 @@ impl WasapiClient {
             let url = self.primary_location_url(&file)?;
             let partial_path = partial_path(&path)?;
 
-            let (mut resume_from, mut hasher) = examine_partial(&partial_path, file.size).await?;
+            let (resume_from, mut hasher) = examine_partial(&partial_path, file.size).await?;
 
             if resume_from == file.size {
                 let actual_sha1 = format!("{:x}", hasher.finalize());
@@ -107,14 +107,6 @@ impl WasapiClient {
                 return;
             }
 
-            let mut response = self.transport.get_response_range(url.clone(), resume_from).await?;
-
-            if resume_from > 0 && response.status() == reqwest::StatusCode::OK {
-                tokio::fs::remove_file(&partial_path).await?;
-                resume_from = 0;
-                hasher = Sha1::new();
-            }
-
             let mut out = if resume_from > 0 {
                 tokio::fs::OpenOptions::new()
                     .append(true)
@@ -126,6 +118,8 @@ impl WasapiClient {
 
             let mut received: u64 = resume_from;
             let mut last_progress: Option<Instant> = None;
+            let mut attempts_left = self.transport.max_attempts();
+            let mut delay = self.transport.backoff();
 
             if resume_from > 0 {
                 yield DownloadOutcome::Progress {
@@ -136,21 +130,67 @@ impl WasapiClient {
                 last_progress = Some(Instant::now());
             }
 
-            while let Some(chunk) = response.chunk().await? {
-                hasher.update(&chunk);
-                out.write_all(&chunk).await?;
-                received += chunk.len() as u64;
-                let emit = match last_progress {
-                    None => true,
-                    Some(t) => t.elapsed() >= PROGRESS_INTERVAL,
-                };
-                if emit {
-                    yield DownloadOutcome::Progress {
-                        file: file.clone(),
-                        received,
-                        total: file.size,
+            'download: loop {
+                let mut response = self.transport.get_response_range(url.clone(), received).await?;
+
+                if received > 0 {
+                    match response.status() {
+                        reqwest::StatusCode::OK => {
+                            drop(out);
+                            tokio::fs::remove_file(&partial_path).await?;
+                            out = tokio::fs::File::create(&partial_path).await?;
+                            received = 0;
+                            hasher = Sha1::new();
+                            attempts_left = self.transport.max_attempts();
+                            delay = self.transport.backoff();
+                        }
+                        reqwest::StatusCode::PARTIAL_CONTENT => {
+                            validate_content_range(&response, received, file.size, &url)?;
+                        }
+                        status => {
+                            Err(Error::InvalidRangeResponse {
+                                url: url.to_string(),
+                                details: format!("expected 200 or 206 for resume, got {status}"),
+                            })?;
+                        }
+                    }
+                }
+
+                loop {
+                    let chunk = match response.chunk().await {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => break 'download,
+                        Err(e) => {
+                            let err = Error::from(e);
+                            if attempts_left > 1 && is_retryable(&err) {
+                                attempts_left -= 1;
+                                tokio::time::sleep(delay).await;
+                                delay = delay.saturating_mul(2);
+                                continue 'download;
+                            }
+                            Err(err)?;
+                            unreachable!();
+                        }
                     };
-                    last_progress = Some(Instant::now());
+
+                    hasher.update(&chunk);
+                    out.write_all(&chunk).await?;
+                    received += chunk.len() as u64;
+                    attempts_left = self.transport.max_attempts();
+                    delay = self.transport.backoff();
+
+                    let emit = match last_progress {
+                        None => true,
+                        Some(t) => t.elapsed() >= PROGRESS_INTERVAL,
+                    };
+                    if emit {
+                        yield DownloadOutcome::Progress {
+                            file: file.clone(),
+                            received,
+                            total: file.size,
+                        };
+                        last_progress = Some(Instant::now());
+                    }
                 }
             }
 
@@ -281,6 +321,69 @@ fn partial_path(path: &Path) -> Result<PathBuf, Error> {
         .to_os_string();
     file_name.push(".part");
     Ok(path.with_file_name(file_name))
+}
+
+fn validate_content_range(
+    response: &reqwest::Response,
+    expected_start: u64,
+    expected_total: u64,
+    url: &Url,
+) -> Result<(), Error> {
+    let header = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .ok_or_else(|| Error::InvalidRangeResponse {
+            url: url.to_string(),
+            details: "missing Content-Range header on 206 response".into(),
+        })?;
+    let value = header.to_str().map_err(|_| Error::InvalidRangeResponse {
+        url: url.to_string(),
+        details: "invalid Content-Range header encoding".into(),
+    })?;
+    let range = value
+        .strip_prefix("bytes ")
+        .ok_or_else(|| Error::InvalidRangeResponse {
+            url: url.to_string(),
+            details: format!("unexpected Content-Range format: {value}"),
+        })?;
+    let (bounds, total) = range
+        .split_once('/')
+        .ok_or_else(|| Error::InvalidRangeResponse {
+            url: url.to_string(),
+            details: format!("unexpected Content-Range format: {value}"),
+        })?;
+    let (start, _) = bounds
+        .split_once('-')
+        .ok_or_else(|| Error::InvalidRangeResponse {
+            url: url.to_string(),
+            details: format!("unexpected Content-Range format: {value}"),
+        })?;
+    let start = start
+        .parse::<u64>()
+        .map_err(|_| Error::InvalidRangeResponse {
+            url: url.to_string(),
+            details: format!("invalid Content-Range start: {value}"),
+        })?;
+    let total = total
+        .parse::<u64>()
+        .map_err(|_| Error::InvalidRangeResponse {
+            url: url.to_string(),
+            details: format!("invalid Content-Range total: {value}"),
+        })?;
+
+    if start != expected_start {
+        return Err(Error::InvalidRangeResponse {
+            url: url.to_string(),
+            details: format!("Content-Range starts at {start}, expected {expected_start}"),
+        });
+    }
+    if total != expected_total {
+        return Err(Error::InvalidRangeResponse {
+            url: url.to_string(),
+            details: format!("Content-Range total is {total}, expected {expected_total}"),
+        });
+    }
+    Ok(())
 }
 
 async fn verify_and_finalize(
