@@ -37,6 +37,14 @@ impl Transport {
         })
     }
 
+    pub(crate) fn backoff(&self) -> Duration {
+        self.backoff
+    }
+
+    pub(crate) fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
     pub(crate) async fn get_json<Q, T>(&self, path: &str, query: &Q) -> Result<T, Error>
     where
         Q: Serialize + ?Sized,
@@ -62,14 +70,6 @@ impl Transport {
         let range = if from > 0 { Some(from) } else { None };
         self.get_response_with_query(&self.download_client, url, &(), range)
             .await
-    }
-
-    pub(crate) fn backoff(&self) -> Duration {
-        self.backoff
-    }
-
-    pub(crate) fn max_attempts(&self) -> u32 {
-        self.max_attempts
     }
 
     async fn get_response_with_query<Q>(

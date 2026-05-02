@@ -18,6 +18,47 @@ pub const PRIMARY_LOCATION_SRC: &str = "https://warcs.archive-it.org";
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 
+#[derive(Debug)]
+pub enum DownloadOutcome {
+    Downloaded {
+        file: WasapiFile,
+        path: PathBuf,
+    },
+    Progress {
+        file: WasapiFile,
+        received: u64,
+        total: u64,
+    },
+    Skipped {
+        file: WasapiFile,
+        path: PathBuf,
+    },
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct WebdataQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filetype: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crawl: Option<u64>,
+    #[serde(rename = "crawl-time-after", skip_serializing_if = "Option::is_none")]
+    pub crawl_time_after: Option<String>,
+    #[serde(rename = "crawl-time-before", skip_serializing_if = "Option::is_none")]
+    pub crawl_time_before: Option<String>,
+    #[serde(rename = "crawl-start-after", skip_serializing_if = "Option::is_none")]
+    pub crawl_start_after: Option<String>,
+    #[serde(rename = "crawl-start-before", skip_serializing_if = "Option::is_none")]
+    pub crawl_start_before: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+}
+
 pub struct WasapiClient {
     transport: Transport,
     primary_location_src: String,
@@ -77,7 +118,8 @@ impl WasapiClient {
         &self,
         file: WasapiFile,
     ) -> Result<impl Stream<Item = Result<Bytes, Error>> + Send + 'static, Error> {
-        let (_, response) = self.download_response(&file).await?;
+        let url = self.primary_location_url(&file)?;
+        let response = self.transport.get_response(url).await?;
         Ok(response.bytes_stream().map_err(Error::from))
     }
 
@@ -91,61 +133,51 @@ impl WasapiClient {
             let url = self.primary_location_url(&file)?;
             let partial_path = partial_path(&path)?;
 
-            let (resume_from, mut hasher) = examine_partial(&partial_path, file.size).await?;
-
-            if resume_from == file.size {
-                let actual_sha1 = format!("{:x}", hasher.finalize());
-                if actual_sha1 != file.checksums.sha1 {
-                    Err(Error::ChecksumMismatch {
-                        url: url.to_string(),
-                        expected: file.checksums.sha1.clone(),
-                        actual: actual_sha1,
-                    })?;
+            let mut state = match prepare_partial_download(&partial_path, file.size).await? {
+                DownloadState::Complete { hasher } => {
+                    let actual_sha1 = format!("{:x}", hasher.finalize());
+                    if actual_sha1 != file.checksums.sha1 {
+                        Err(Error::ChecksumMismatch {
+                            url: url.to_string(),
+                            expected: file.checksums.sha1.clone(),
+                            actual: actual_sha1,
+                        })?;
+                    }
+                    tokio::fs::rename(&partial_path, &path).await?;
+                    yield DownloadOutcome::Downloaded { file, path };
+                    return;
                 }
-                tokio::fs::rename(&partial_path, &path).await?;
-                yield DownloadOutcome::Downloaded { file, path };
-                return;
-            }
-
-            let mut out = if resume_from > 0 {
-                tokio::fs::OpenOptions::new()
-                    .append(true)
-                    .open(&partial_path)
-                    .await?
-            } else {
-                tokio::fs::File::create(&partial_path).await?
+                DownloadState::InProgress(state) => state,
             };
 
-            let mut received: u64 = resume_from;
             let mut last_progress: Option<Instant> = None;
             let mut attempts_left = self.transport.max_attempts();
             let mut delay = self.transport.backoff();
 
-            if resume_from > 0 {
+            if state.received > 0 {
                 yield DownloadOutcome::Progress {
                     file: file.clone(),
-                    received,
+                    received: state.received,
                     total: file.size,
                 };
                 last_progress = Some(Instant::now());
             }
 
             'download: loop {
-                let mut response = self.transport.get_response_range(url.clone(), received).await?;
+                let mut response = self
+                    .transport
+                    .get_response_range(url.clone(), state.received)
+                    .await?;
 
-                if received > 0 {
+                if state.received > 0 {
                     match response.status() {
                         reqwest::StatusCode::OK => {
-                            drop(out);
-                            tokio::fs::remove_file(&partial_path).await?;
-                            out = tokio::fs::File::create(&partial_path).await?;
-                            received = 0;
-                            hasher = Sha1::new();
+                            state.restart(&partial_path).await?;
                             attempts_left = self.transport.max_attempts();
                             delay = self.transport.backoff();
                         }
                         reqwest::StatusCode::PARTIAL_CONTENT => {
-                            validate_content_range(&response, received, file.size, &url)?;
+                            validate_content_range(&response, state.received, file.size, &url)?;
                         }
                         status => {
                             Err(Error::InvalidRangeResponse {
@@ -173,9 +205,7 @@ impl WasapiClient {
                         }
                     };
 
-                    hasher.update(&chunk);
-                    out.write_all(&chunk).await?;
-                    received += chunk.len() as u64;
+                    state.write_chunk(&chunk).await?;
                     attempts_left = self.transport.max_attempts();
                     delay = self.transport.backoff();
 
@@ -186,7 +216,7 @@ impl WasapiClient {
                     if emit {
                         yield DownloadOutcome::Progress {
                             file: file.clone(),
-                            received,
+                            received: state.received,
                             total: file.size,
                         };
                         last_progress = Some(Instant::now());
@@ -194,15 +224,15 @@ impl WasapiClient {
                 }
             }
 
-            verify_and_finalize(
-                out,
-                &partial_path,
-                &path,
-                hasher,
-                file.size,
-                &file.checksums.sha1,
-                &url,
-            ).await?;
+            state
+                .finalize(
+                    &partial_path,
+                    &path,
+                    file.size,
+                    &file.checksums.sha1,
+                    &url,
+                )
+                .await?;
             yield DownloadOutcome::Downloaded { file, path };
         }
     }
@@ -238,15 +268,6 @@ impl WasapiClient {
         }
     }
 
-    async fn download_response(
-        &self,
-        file: &WasapiFile,
-    ) -> Result<(Url, reqwest::Response), Error> {
-        let url = self.primary_location_url(file)?;
-        let response = self.transport.get_response(url.clone()).await?;
-        Ok((url, response))
-    }
-
     fn primary_location_url(&self, file: &WasapiFile) -> Result<Url, Error> {
         let location = file
             .locations
@@ -259,21 +280,58 @@ impl WasapiClient {
     }
 }
 
-#[derive(Debug)]
-pub enum DownloadOutcome {
-    Downloaded {
-        file: WasapiFile,
-        path: PathBuf,
-    },
-    Progress {
-        file: WasapiFile,
-        received: u64,
-        total: u64,
-    },
-    Skipped {
-        file: WasapiFile,
-        path: PathBuf,
-    },
+enum DownloadState {
+    Complete { hasher: Sha1 },
+    InProgress(PartialDownload),
+}
+
+struct PartialDownload {
+    out: tokio::fs::File,
+    received: u64,
+    hasher: Sha1,
+}
+
+impl PartialDownload {
+    async fn restart(&mut self, partial_path: &Path) -> Result<(), Error> {
+        let replacement = tokio::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(partial_path)
+            .await?;
+        let previous = std::mem::replace(&mut self.out, replacement);
+        drop(previous);
+        self.received = 0;
+        self.hasher = Sha1::new();
+        Ok(())
+    }
+
+    async fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), Error> {
+        self.hasher.update(chunk);
+        self.out.write_all(chunk).await?;
+        self.received += chunk.len() as u64;
+        Ok(())
+    }
+
+    async fn finalize(
+        self,
+        partial_path: &Path,
+        final_path: &Path,
+        expected_size: u64,
+        expected_sha1: &str,
+        url: &Url,
+    ) -> Result<(), Error> {
+        verify_and_finalize(
+            self.out,
+            partial_path,
+            final_path,
+            self.hasher,
+            expected_size,
+            expected_sha1,
+            url,
+        )
+        .await
+    }
 }
 
 async fn existing_sha1_matches(path: &Path, expected: &str) -> Result<bool, Error> {
@@ -283,19 +341,6 @@ async fn existing_sha1_matches(path: &Path, expected: &str) -> Result<bool, Erro
     let mut hasher = Sha1::new();
     seed_hasher_from_file(path, &mut hasher).await?;
     Ok(format!("{:x}", hasher.finalize()) == expected)
-}
-
-async fn seed_hasher_from_file(path: &Path, hasher: &mut Sha1) -> Result<(), Error> {
-    let mut f = tokio::fs::File::open(path).await?;
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = f.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(())
 }
 
 async fn examine_partial(partial_path: &Path, expected_size: u64) -> Result<(u64, Sha1), Error> {
@@ -312,6 +357,42 @@ async fn examine_partial(partial_path: &Path, expected_size: u64) -> Result<(u64
         seed_hasher_from_file(partial_path, &mut hasher).await?;
     }
     Ok((m.len(), hasher))
+}
+
+async fn prepare_partial_download(
+    partial_path: &Path,
+    expected_size: u64,
+) -> Result<DownloadState, Error> {
+    let (received, hasher) = examine_partial(partial_path, expected_size).await?;
+    if received == expected_size {
+        return Ok(DownloadState::Complete { hasher });
+    }
+    let out = if received > 0 {
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(partial_path)
+            .await?
+    } else {
+        tokio::fs::File::create(partial_path).await?
+    };
+    Ok(DownloadState::InProgress(PartialDownload {
+        out,
+        received,
+        hasher,
+    }))
+}
+
+async fn seed_hasher_from_file(path: &Path, hasher: &mut Sha1) -> Result<(), Error> {
+    let mut f = tokio::fs::File::open(path).await?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(())
 }
 
 fn partial_path(path: &Path) -> Result<PathBuf, Error> {
@@ -415,30 +496,6 @@ async fn verify_and_finalize(
     }
     tokio::fs::rename(partial_path, final_path).await?;
     Ok(())
-}
-
-#[derive(Debug, Default, Clone, Serialize)]
-pub struct WebdataQuery {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filename: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filetype: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub collection: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub crawl: Option<u64>,
-    #[serde(rename = "crawl-time-after", skip_serializing_if = "Option::is_none")]
-    pub crawl_time_after: Option<String>,
-    #[serde(rename = "crawl-time-before", skip_serializing_if = "Option::is_none")]
-    pub crawl_time_before: Option<String>,
-    #[serde(rename = "crawl-start-after", skip_serializing_if = "Option::is_none")]
-    pub crawl_start_after: Option<String>,
-    #[serde(rename = "crawl-start-before", skip_serializing_if = "Option::is_none")]
-    pub crawl_start_before: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub page: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub page_size: Option<u32>,
 }
 
 #[cfg(test)]
