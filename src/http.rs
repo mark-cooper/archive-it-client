@@ -44,7 +44,9 @@ pub(crate) struct Transport {
 
 impl Transport {
     pub(crate) fn new(cfg: Config, creds: Option<(String, String)>) -> Result<Self, Error> {
-        let client = reqwest::Client::builder().timeout(cfg.timeout).build()?;
+        let client = reqwest::Client::builder()
+            .read_timeout(cfg.timeout)
+            .build()?;
         Ok(Self {
             client,
             base_url: Url::parse(&cfg.base_url)?,
@@ -60,12 +62,28 @@ impl Transport {
         T: DeserializeOwned,
     {
         let url = self.base_url.join(path)?;
+        let resp = self.get_response_with_query(url, query).await?;
+        Ok(resp.json().await?)
+    }
+
+    pub(crate) async fn get_response(&self, url: Url) -> Result<reqwest::Response, Error> {
+        self.get_response_with_query(url, &()).await
+    }
+
+    async fn get_response_with_query<Q>(
+        &self,
+        url: Url,
+        query: &Q,
+    ) -> Result<reqwest::Response, Error>
+    where
+        Q: Serialize + ?Sized,
+    {
         let mut delay = self.backoff;
         let mut attempts_left = self.max_attempts;
 
         loop {
             attempts_left -= 1;
-            let result = self.send_once::<T, Q>(&url, query).await;
+            let result = self.attempt(&url, query).await;
 
             if attempts_left == 0 {
                 return result;
@@ -81,9 +99,8 @@ impl Transport {
         }
     }
 
-    async fn send_once<T, Q>(&self, url: &Url, query: &Q) -> Result<T, Error>
+    async fn attempt<Q>(&self, url: &Url, query: &Q) -> Result<reqwest::Response, Error>
     where
-        T: DeserializeOwned,
         Q: Serialize + ?Sized,
     {
         let mut req = self.client.get(url.clone()).query(query);
@@ -93,12 +110,12 @@ impl Transport {
         let resp = req.send().await?;
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(Error::NotFound);
+            return Err(Error::NotFound(url.to_string()));
         }
         if !status.is_success() {
             return Err(Error::Status(status));
         }
-        Ok(resp.json().await?)
+        Ok(resp)
     }
 }
 

@@ -1,2 +1,4 @@
-/target
+/examples/scratch.rs
 /fixtures.local
+/src/bin/scratch.rs
+/target

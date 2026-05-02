@@ -1,9 +1,12 @@
 use std::time::Duration;
 
+use archive_it_client::models::wasapi::{Checksums, WasapiFile};
 use archive_it_client::{
     Config, Error, PageOpts, PartnerClient, PublicClient, WasapiClient, WebdataQuery,
 };
 use serde_json::json;
+use sha1::{Digest, Sha1};
+use tempfile::TempDir;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -114,7 +117,7 @@ async fn not_found_maps_to_error_and_does_not_retry() {
     let client = PublicClient::with_config(cfg).unwrap();
     let err = client.get_account(999).await.unwrap_err();
 
-    assert!(matches!(err, Error::NotFound));
+    assert!(matches!(err, Error::NotFound(_)));
 }
 
 #[tokio::test]
@@ -326,6 +329,150 @@ async fn wasapi_serializes_all_query_parameters() {
         page_size: Some(500),
     };
     client.list_webdata(&query).await.unwrap();
+}
+
+fn wasapi_file_at(server: &MockServer, content: &[u8]) -> WasapiFile {
+    WasapiFile {
+        filename: "ARCHIVEIT-1.warc.gz".into(),
+        filetype: "warc".into(),
+        checksums: Checksums {
+            sha1: format!("{:x}", Sha1::digest(content)),
+            md5: String::new(),
+        },
+        account: 1,
+        size: content.len() as u64,
+        collection: 4472,
+        crawl: 1234,
+        crawl_time: "2025-01-01T00:00:00Z".into(),
+        crawl_start: "2025-01-01T00:00:00Z".into(),
+        store_time: "2025-01-01T00:00:00Z".into(),
+        locations: vec![format!("{}/warcs/foo.warc.gz", server.uri())],
+    }
+}
+
+fn wasapi_download_client(server: &MockServer) -> WasapiClient {
+    WasapiClient::with_config("u", "p", wasapi_config(server))
+        .unwrap()
+        .with_primary_location_src(server.uri())
+}
+
+#[tokio::test]
+async fn download_writes_file_and_verifies_sha1() {
+    let server = MockServer::start().await;
+    let content = b"hello warc world";
+
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let out = dir.path().join("out.warc.gz");
+    let client = wasapi_download_client(&server);
+    client
+        .download(wasapi_file_at(&server, content), &out)
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(&out).unwrap(), content);
+    assert!(!dir.path().join("out.warc.gz.part").exists());
+}
+
+#[tokio::test]
+async fn download_returns_size_mismatch() {
+    let server = MockServer::start().await;
+    let content = b"actual content";
+
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.to_vec()))
+        .mount(&server)
+        .await;
+
+    let mut file = wasapi_file_at(&server, content);
+    file.size = 9999;
+
+    let dir = TempDir::new().unwrap();
+    let out = dir.path().join("out.warc.gz");
+    let err = wasapi_download_client(&server)
+        .download(file, &out)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        Error::SizeMismatch {
+            expected: 9999,
+            actual: 14,
+            ..
+        }
+    ));
+    assert!(!out.exists());
+}
+
+#[tokio::test]
+async fn download_returns_checksum_mismatch() {
+    let server = MockServer::start().await;
+    let content = b"some bytes";
+
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.to_vec()))
+        .mount(&server)
+        .await;
+
+    let mut file = wasapi_file_at(&server, content);
+    file.checksums.sha1 = "0000000000000000000000000000000000000000".into();
+
+    let dir = TempDir::new().unwrap();
+    let out = dir.path().join("out.warc.gz");
+    let err = wasapi_download_client(&server)
+        .download(file, &out)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, Error::ChecksumMismatch { .. }));
+    assert!(!out.exists());
+}
+
+#[tokio::test]
+async fn download_returns_primary_location_missing() {
+    let server = MockServer::start().await;
+    let mut file = wasapi_file_at(&server, b"x");
+    file.locations = vec!["https://other.example.com/warc".into()];
+
+    let dir = TempDir::new().unwrap();
+    let out = dir.path().join("out.warc.gz");
+    let err = wasapi_download_client(&server)
+        .download(file, &out)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, Error::PrimaryLocationMissing { .. }));
+}
+
+#[tokio::test]
+async fn download_stream_yields_bytes() {
+    use futures::TryStreamExt;
+
+    let server = MockServer::start().await;
+    let content = b"streaming content".to_vec();
+
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone()))
+        .mount(&server)
+        .await;
+
+    let stream = wasapi_download_client(&server)
+        .download_stream(wasapi_file_at(&server, &content))
+        .await
+        .unwrap();
+    let chunks: Vec<bytes::Bytes> = stream.try_collect().await.unwrap();
+    let collected: Vec<u8> = chunks.iter().flat_map(|b| b.iter().copied()).collect();
+    assert_eq!(collected, content);
 }
 
 #[tokio::test]
