@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use archive_it_client::models::wasapi::{Checksums, WasapiFile};
 use archive_it_client::{
-    Config, Error, PageOpts, PartnerClient, PublicClient, WasapiClient, WebdataQuery,
+    Config, DownloadOutcome, Error, PageOpts, PartnerClient, PublicClient, WasapiClient,
+    WebdataQuery,
 };
 use serde_json::json;
 use sha1::{Digest, Sha1};
@@ -519,6 +520,158 @@ async fn download_stream_yields_bytes() {
     let chunks: Vec<bytes::Bytes> = stream.try_collect().await.unwrap();
     let collected: Vec<u8> = chunks.iter().flat_map(|b| b.iter().copied()).collect();
     assert_eq!(collected, content);
+}
+
+fn wasapi_file_json(f: &WasapiFile) -> serde_json::Value {
+    json!({
+        "filename": f.filename,
+        "filetype": f.filetype,
+        "checksums": { "sha1": f.checksums.sha1, "md5": f.checksums.md5 },
+        "account": f.account,
+        "size": f.size,
+        "collection": f.collection,
+        "crawl": f.crawl,
+        "crawl-time": f.crawl_time,
+        "crawl-start": f.crawl_start,
+        "store-time": f.store_time,
+        "locations": f.locations,
+    })
+}
+
+#[tokio::test]
+async fn download_collection_writes_files_and_emits_downloaded() {
+    use futures::TryStreamExt;
+
+    let server = MockServer::start().await;
+    let content = b"warc bytes";
+    let file = wasapi_file_at(&server, content);
+
+    Mock::given(method("GET"))
+        .and(path("/webdata"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "files": [wasapi_file_json(&file)],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let outcomes: Vec<_> = wasapi_download_client(&server)
+        .download_collection(
+            WebdataQuery {
+                collection: Some(4472),
+                ..Default::default()
+            },
+            dir.path(),
+        )
+        .try_collect()
+        .await
+        .unwrap();
+
+    assert_eq!(outcomes.len(), 1);
+    assert!(matches!(outcomes[0], DownloadOutcome::Downloaded { .. }));
+    assert_eq!(
+        std::fs::read(dir.path().join("ARCHIVEIT-1.warc.gz")).unwrap(),
+        content
+    );
+}
+
+#[tokio::test]
+async fn download_collection_skips_existing_files_with_matching_sha1() {
+    use futures::TryStreamExt;
+
+    let server = MockServer::start().await;
+    let content = b"warc bytes";
+    let file = wasapi_file_at(&server, content);
+
+    Mock::given(method("GET"))
+        .and(path("/webdata"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "files": [wasapi_file_json(&file)],
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let target = dir.path().join("ARCHIVEIT-1.warc.gz");
+    std::fs::write(&target, content).unwrap();
+
+    let outcomes: Vec<_> = wasapi_download_client(&server)
+        .download_collection(
+            WebdataQuery {
+                collection: Some(4472),
+                ..Default::default()
+            },
+            dir.path(),
+        )
+        .try_collect()
+        .await
+        .unwrap();
+
+    assert_eq!(outcomes.len(), 1);
+    assert!(matches!(outcomes[0], DownloadOutcome::Skipped { .. }));
+
+    let received = server.received_requests().await.unwrap();
+    let warc_hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/warcs/foo.warc.gz")
+        .count();
+    assert_eq!(warc_hits, 0);
+}
+
+#[tokio::test]
+async fn download_collection_creates_missing_directory() {
+    use futures::TryStreamExt;
+
+    let server = MockServer::start().await;
+    let content = b"warc bytes";
+    let file = wasapi_file_at(&server, content);
+
+    Mock::given(method("GET"))
+        .and(path("/webdata"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "files": [wasapi_file_json(&file)],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.to_vec()))
+        .mount(&server)
+        .await;
+
+    let root = TempDir::new().unwrap();
+    let nested = root.path().join("a").join("b");
+    assert!(!nested.exists());
+
+    let _: Vec<_> = wasapi_download_client(&server)
+        .download_collection(
+            WebdataQuery {
+                collection: Some(4472),
+                ..Default::default()
+            },
+            &nested,
+        )
+        .try_collect()
+        .await
+        .unwrap();
+
+    assert!(nested.is_dir());
+    assert!(nested.join("ARCHIVEIT-1.warc.gz").exists());
 }
 
 #[tokio::test]

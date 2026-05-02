@@ -12,7 +12,7 @@ pub mod wasapi;
 pub use error::Error;
 pub use partner::PartnerClient;
 pub use public::PublicClient;
-pub use wasapi::{WasapiClient, WebdataQuery};
+pub use wasapi::{DownloadOutcome, WasapiClient, WebdataQuery};
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
 pub struct PageOpts {

@@ -1,11 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::pin::pin;
 
 use bytes::Bytes;
 use futures_core::Stream;
 use futures_util::TryStreamExt;
 use serde::Serialize;
 use sha1::{Digest, Sha1};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
 use crate::http::Transport;
@@ -77,6 +78,27 @@ impl WasapiClient {
         Ok(())
     }
 
+    pub fn download_collection(
+        &self,
+        query: WebdataQuery,
+        dir: impl Into<PathBuf>,
+    ) -> impl Stream<Item = Result<DownloadOutcome, Error>> + Send + '_ {
+        let dir = dir.into();
+        async_stream::try_stream! {
+            tokio::fs::create_dir_all(&dir).await?;
+            let mut files = pin!(self.webdata(query));
+            while let Some(file) = files.try_next().await? {
+                let path = dir.join(&file.filename);
+                if existing_sha1_matches(&path, &file.checksums.sha1).await? {
+                    yield DownloadOutcome::Skipped { file, path };
+                    continue;
+                }
+                self.download(file.clone(), &path).await?;
+                yield DownloadOutcome::Downloaded { file, path };
+            }
+        }
+    }
+
     pub async fn download_stream(
         &self,
         file: WasapiFile,
@@ -135,6 +157,29 @@ impl WasapiClient {
             })?;
         Ok(Url::parse(location)?)
     }
+}
+
+#[derive(Debug)]
+pub enum DownloadOutcome {
+    Downloaded { file: WasapiFile, path: PathBuf },
+    Skipped { file: WasapiFile, path: PathBuf },
+}
+
+async fn existing_sha1_matches(path: &Path, expected: &str) -> Result<bool, Error> {
+    if !tokio::fs::try_exists(path).await? {
+        return Ok(false);
+    }
+    let mut f = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha1::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()) == expected)
 }
 
 fn partial_path(path: &Path) -> Result<PathBuf, Error> {
