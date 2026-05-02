@@ -16,6 +16,7 @@ fn config(server: &MockServer) -> Config {
     cfg.base_url = format!("{}/", server.uri());
     cfg.max_attempts = 1;
     cfg.timeout = Duration::from_secs(2);
+    cfg.download_timeout = Duration::from_secs(2);
     cfg.backoff = Duration::from_millis(1);
     cfg
 }
@@ -336,6 +337,7 @@ fn wasapi_config(server: &MockServer) -> Config {
     cfg.base_url = format!("{}/", server.uri());
     cfg.max_attempts = 1;
     cfg.timeout = Duration::from_secs(2);
+    cfg.download_timeout = Duration::from_secs(2);
     cfg.backoff = Duration::from_millis(1);
     cfg
 }
@@ -576,12 +578,69 @@ async fn download_collection_writes_files_and_emits_downloaded() {
         .await
         .unwrap();
 
-    assert_eq!(outcomes.len(), 1);
-    assert!(matches!(outcomes[0], DownloadOutcome::Downloaded { .. }));
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, DownloadOutcome::Progress { .. }))
+    );
+    assert!(matches!(
+        outcomes.last(),
+        Some(DownloadOutcome::Downloaded { .. })
+    ));
     assert_eq!(
         std::fs::read(dir.path().join("ARCHIVEIT-1.warc.gz")).unwrap(),
         content
     );
+}
+
+#[tokio::test]
+async fn download_collection_progress_event_carries_received_and_total() {
+    use futures::TryStreamExt;
+
+    let server = MockServer::start().await;
+    let content = b"warc bytes";
+    let file = wasapi_file_at(&server, content);
+
+    Mock::given(method("GET"))
+        .and(path("/webdata"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "files": [wasapi_file_json(&file)],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.to_vec()))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let outcomes: Vec<_> = wasapi_download_client(&server)
+        .download_collection(
+            WebdataQuery {
+                collection: Some(4472),
+                ..Default::default()
+            },
+            dir.path(),
+        )
+        .try_collect()
+        .await
+        .unwrap();
+
+    let progress = outcomes
+        .iter()
+        .find_map(|o| match o {
+            DownloadOutcome::Progress {
+                received, total, ..
+            } => Some((*received, *total)),
+            _ => None,
+        })
+        .expect("expected at least one Progress event");
+    assert_eq!(progress.0, content.len() as u64);
+    assert_eq!(progress.1, content.len() as u64);
 }
 
 #[tokio::test]

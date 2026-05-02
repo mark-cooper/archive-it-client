@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::pin::pin;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_core::Stream;
@@ -14,6 +15,8 @@ use crate::models::wasapi::{Page, WasapiFile};
 use crate::{Config, Error};
 
 pub const PRIMARY_LOCATION_SRC: &str = "https://warcs.archive-it.org";
+
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct WasapiClient {
     transport: Transport,
@@ -42,7 +45,6 @@ impl WasapiClient {
     }
 
     pub async fn download(&self, file: WasapiFile, path: impl AsRef<Path>) -> Result<(), Error> {
-        let expected = file.size;
         let (url, mut response) = self.download_response(&file).await?;
         let path = path.as_ref();
         let partial_path = partial_path(path)?;
@@ -54,28 +56,16 @@ impl WasapiClient {
             out.write_all(&chunk).await?;
         }
 
-        out.sync_all().await?;
-        let actual_size = out.metadata().await?.len();
-        drop(out);
-
-        if actual_size != expected {
-            return Err(Error::SizeMismatch {
-                url: url.into(),
-                expected,
-                actual: actual_size,
-            });
-        }
-        let actual_sha1 = format!("{:x}", hasher.finalize());
-        if actual_sha1 != file.checksums.sha1 {
-            return Err(Error::ChecksumMismatch {
-                url: url.into(),
-                expected: file.checksums.sha1,
-                actual: actual_sha1,
-            });
-        }
-
-        tokio::fs::rename(partial_path, path).await?;
-        Ok(())
+        verify_and_finalize(
+            out,
+            &partial_path,
+            path,
+            hasher,
+            file.size,
+            &file.checksums.sha1,
+            &url,
+        )
+        .await
     }
 
     pub fn download_collection(
@@ -93,7 +83,42 @@ impl WasapiClient {
                     yield DownloadOutcome::Skipped { file, path };
                     continue;
                 }
-                self.download(file.clone(), &path).await?;
+
+                let url = self.primary_location_url(&file)?;
+                let mut response = self.transport.get_response(url.clone()).await?;
+                let partial_path = partial_path(&path)?;
+                let mut out = tokio::fs::File::create(&partial_path).await?;
+                let mut hasher = Sha1::new();
+                let mut received: u64 = 0;
+                let mut last_progress: Option<Instant> = None;
+
+                while let Some(chunk) = response.chunk().await? {
+                    hasher.update(&chunk);
+                    out.write_all(&chunk).await?;
+                    received += chunk.len() as u64;
+                    let emit = match last_progress {
+                        None => true,
+                        Some(t) => t.elapsed() >= PROGRESS_INTERVAL,
+                    };
+                    if emit {
+                        yield DownloadOutcome::Progress {
+                            file: file.clone(),
+                            received,
+                            total: file.size,
+                        };
+                        last_progress = Some(Instant::now());
+                    }
+                }
+
+                verify_and_finalize(
+                    out,
+                    &partial_path,
+                    &path,
+                    hasher,
+                    file.size,
+                    &file.checksums.sha1,
+                    &url,
+                ).await?;
                 yield DownloadOutcome::Downloaded { file, path };
             }
         }
@@ -161,8 +186,19 @@ impl WasapiClient {
 
 #[derive(Debug)]
 pub enum DownloadOutcome {
-    Downloaded { file: WasapiFile, path: PathBuf },
-    Skipped { file: WasapiFile, path: PathBuf },
+    Downloaded {
+        file: WasapiFile,
+        path: PathBuf,
+    },
+    Progress {
+        file: WasapiFile,
+        received: u64,
+        total: u64,
+    },
+    Skipped {
+        file: WasapiFile,
+        path: PathBuf,
+    },
 }
 
 async fn existing_sha1_matches(path: &Path, expected: &str) -> Result<bool, Error> {
@@ -189,6 +225,37 @@ fn partial_path(path: &Path) -> Result<PathBuf, Error> {
         .to_os_string();
     file_name.push(".part");
     Ok(path.with_file_name(file_name))
+}
+
+async fn verify_and_finalize(
+    out: tokio::fs::File,
+    partial_path: &Path,
+    final_path: &Path,
+    hasher: Sha1,
+    expected_size: u64,
+    expected_sha1: &str,
+    url: &Url,
+) -> Result<(), Error> {
+    out.sync_all().await?;
+    let actual_size = out.metadata().await?.len();
+    drop(out);
+    if actual_size != expected_size {
+        return Err(Error::SizeMismatch {
+            url: url.to_string(),
+            expected: expected_size,
+            actual: actual_size,
+        });
+    }
+    let actual_sha1 = format!("{:x}", hasher.finalize());
+    if actual_sha1 != expected_sha1 {
+        return Err(Error::ChecksumMismatch {
+            url: url.to_string(),
+            expected: expected_sha1.to_string(),
+            actual: actual_sha1,
+        });
+    }
+    tokio::fs::rename(partial_path, final_path).await?;
+    Ok(())
 }
 
 #[derive(Debug, Default, Clone, Serialize)]

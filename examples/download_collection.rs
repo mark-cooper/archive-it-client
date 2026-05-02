@@ -20,14 +20,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut stream = pin!(client.download_collection(query, &dir));
-    match stream.try_next().await? {
-        Some(DownloadOutcome::Downloaded { path, file }) => {
-            println!("downloaded {} ({} bytes)", path.display(), file.size);
+    loop {
+        match stream.try_next().await? {
+            Some(DownloadOutcome::Progress {
+                file,
+                received,
+                total,
+            }) => {
+                let pct = (received as f64 / total as f64) * 100.0;
+                println!(
+                    "  {}: {:.1}% ({} / {} bytes)",
+                    file.filename, pct, received, total
+                );
+            }
+            Some(DownloadOutcome::Downloaded { path, file }) => {
+                println!("downloaded {} ({} bytes)", path.display(), file.size);
+                break;
+            }
+            Some(DownloadOutcome::Skipped { path, .. }) => {
+                println!("skipped {} (already present)", path.display());
+                break;
+            }
+            None => {
+                println!("no files matched query");
+                break;
+            }
         }
-        Some(DownloadOutcome::Skipped { path, .. }) => {
-            println!("skipped {} (already present)", path.display());
-        }
-        None => println!("no files matched query"),
     }
 
     Ok(())

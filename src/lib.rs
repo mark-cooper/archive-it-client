@@ -26,6 +26,7 @@ pub struct PageOpts {
 pub struct Config {
     pub base_url: String,
     pub timeout: Duration,
+    pub download_timeout: Duration,
     pub max_attempts: u32,
     pub backoff: Duration,
 }
@@ -35,6 +36,7 @@ impl Config {
         Self {
             base_url: "https://partner.archive-it.org/api/".into(),
             timeout: Duration::from_secs(30),
+            download_timeout: Duration::from_secs(30),
             max_attempts: 3,
             backoff: Duration::from_millis(250),
         }
@@ -43,7 +45,8 @@ impl Config {
     pub fn wasapi() -> Self {
         Self {
             base_url: "https://partner.archive-it.org/wasapi/v1/".into(),
-            timeout: Duration::from_secs(120),
+            timeout: Duration::from_secs(60),
+            download_timeout: Duration::from_secs(300),
             ..Self::api()
         }
     }

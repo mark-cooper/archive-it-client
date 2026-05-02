@@ -37,20 +37,25 @@ where
 pub(crate) struct Transport {
     backoff: Duration,
     base_url: Url,
-    client: reqwest::Client,
+    json_client: reqwest::Client,
+    download_client: reqwest::Client,
     creds: Option<(String, String)>,
     max_attempts: u32,
 }
 
 impl Transport {
     pub(crate) fn new(cfg: Config, creds: Option<(String, String)>) -> Result<Self, Error> {
-        let client = reqwest::Client::builder()
+        let json_client = reqwest::Client::builder()
             .read_timeout(cfg.timeout)
+            .build()?;
+        let download_client = reqwest::Client::builder()
+            .read_timeout(cfg.download_timeout)
             .build()?;
         Ok(Self {
             backoff: cfg.backoff,
             base_url: Url::parse(&cfg.base_url)?,
-            client,
+            json_client,
+            download_client,
             creds,
             max_attempts: cfg.max_attempts.max(1),
         })
@@ -62,16 +67,20 @@ impl Transport {
         T: DeserializeOwned,
     {
         let url = self.base_url.join(path)?;
-        let resp = self.get_response_with_query(url, query).await?;
+        let resp = self
+            .get_response_with_query(&self.json_client, url, query)
+            .await?;
         Ok(resp.json().await?)
     }
 
     pub(crate) async fn get_response(&self, url: Url) -> Result<reqwest::Response, Error> {
-        self.get_response_with_query(url, &()).await
+        self.get_response_with_query(&self.download_client, url, &())
+            .await
     }
 
     async fn get_response_with_query<Q>(
         &self,
+        client: &reqwest::Client,
         url: Url,
         query: &Q,
     ) -> Result<reqwest::Response, Error>
@@ -83,7 +92,7 @@ impl Transport {
 
         loop {
             attempts_left -= 1;
-            let result = self.attempt(&url, query).await;
+            let result = self.attempt(client, &url, query).await;
 
             if attempts_left == 0 {
                 return result;
@@ -99,11 +108,16 @@ impl Transport {
         }
     }
 
-    async fn attempt<Q>(&self, url: &Url, query: &Q) -> Result<reqwest::Response, Error>
+    async fn attempt<Q>(
+        &self,
+        client: &reqwest::Client,
+        url: &Url,
+        query: &Q,
+    ) -> Result<reqwest::Response, Error>
     where
         Q: Serialize + ?Sized,
     {
-        let mut req = self.client.get(url.clone()).query(query);
+        let mut req = client.get(url.clone()).query(query);
         if let Some((u, p)) = &self.creds {
             req = req.basic_auth(u, Some(p));
         }
