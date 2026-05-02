@@ -18,23 +18,6 @@ pub const PRIMARY_LOCATION_SRC: &str = "https://warcs.archive-it.org";
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 
-#[derive(Debug)]
-pub enum DownloadOutcome {
-    Downloaded {
-        file: WasapiFile,
-        path: PathBuf,
-    },
-    Progress {
-        file: WasapiFile,
-        received: u64,
-        total: u64,
-    },
-    Skipped {
-        file: WasapiFile,
-        path: PathBuf,
-    },
-}
-
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct WebdataQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -278,6 +261,23 @@ impl WasapiClient {
             })?;
         Ok(Url::parse(location)?)
     }
+}
+
+#[derive(Debug)]
+pub enum DownloadOutcome {
+    Downloaded {
+        file: WasapiFile,
+        path: PathBuf,
+    },
+    Progress {
+        file: WasapiFile,
+        received: u64,
+        total: u64,
+    },
+    Skipped {
+        file: WasapiFile,
+        path: PathBuf,
+    },
 }
 
 enum DownloadState {
