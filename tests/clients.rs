@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use archive_it_client::models::wasapi::{Checksums, WasapiFile};
 use archive_it_client::{
-    Config, DownloadOutcome, Error, PageOpts, PartnerClient, PublicClient, WasapiClient,
-    WebdataQuery,
+    Config, DownloadOutcome, Error, PageOpts, PartnerClient, PublicClient, USER_AGENT,
+    WasapiClient, WebdataQuery,
 };
 use serde_json::json;
 use sha1::{Digest, Sha1};
@@ -41,6 +41,7 @@ async fn public_list_accounts_sends_pagination_params() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/account"))
+        .and(header("user-agent", USER_AGENT))
         .and(query_param("limit", "50"))
         .and(query_param("offset", "100"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
@@ -412,6 +413,7 @@ async fn download_writes_file_and_verifies_sha1() {
 
     Mock::given(method("GET"))
         .and(path("/warcs/foo.warc.gz"))
+        .and(header("user-agent", USER_AGENT))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(content.to_vec()))
         .expect(1)
         .mount(&server)

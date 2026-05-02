@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use url::Url;
 
-use crate::{Config, Error, PageOpts};
+use crate::{Config, Error, PageOpts, USER_AGENT};
 
 pub(crate) const STREAM_PAGE_SIZE: u32 = 100;
 
@@ -22,9 +22,11 @@ pub(crate) struct Transport {
 impl Transport {
     pub(crate) fn new(cfg: Config, creds: Option<(String, String)>) -> Result<Self, Error> {
         let json_client = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
             .read_timeout(cfg.timeout)
             .build()?;
         let download_client = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
             .read_timeout(cfg.download_timeout)
             .build()?;
         Ok(Self {

@@ -14,6 +14,8 @@ pub use partner::PartnerClient;
 pub use public::PublicClient;
 pub use wasapi::{DownloadOutcome, WasapiClient, WebdataQuery};
 
+pub const USER_AGENT: &str = concat!("Archive-It-Client (", env!("CARGO_PKG_VERSION"), ")");
+
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
 pub struct PageOpts {
     #[serde(skip_serializing_if = "Option::is_none")]
