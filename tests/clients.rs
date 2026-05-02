@@ -521,6 +521,107 @@ async fn download_resumes_from_existing_partial() {
 }
 
 #[tokio::test]
+async fn download_rejects_resumed_response_with_mismatched_content_range_start() {
+    let server = MockServer::start().await;
+    let full = b"abcdefghij";
+    let prefix = &full[..3];
+    let suffix = &full[4..];
+
+    let dir = TempDir::new().unwrap();
+    let part_path = dir.path().join("ARCHIVEIT-1.warc.gz.part");
+    std::fs::write(&part_path, prefix).unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .and(header("range", "bytes=3-"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("content-range", format!("bytes 4-9/{}", full.len()))
+                .set_body_bytes(suffix.to_vec()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let file = wasapi_file_at(&server, full);
+    let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
+    let err = wasapi_download_client(&server)
+        .download(file, &final_path)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, Error::InvalidRangeResponse { .. }));
+    assert_eq!(std::fs::read(&part_path).unwrap(), prefix);
+    assert!(!final_path.exists());
+}
+
+#[tokio::test]
+async fn download_rejects_resumed_response_without_content_range() {
+    let server = MockServer::start().await;
+    let full = b"abcdefghij";
+    let prefix = &full[..3];
+    let suffix = &full[3..];
+
+    let dir = TempDir::new().unwrap();
+    let part_path = dir.path().join("ARCHIVEIT-1.warc.gz.part");
+    std::fs::write(&part_path, prefix).unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .and(header("range", "bytes=3-"))
+        .respond_with(ResponseTemplate::new(206).set_body_bytes(suffix.to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let file = wasapi_file_at(&server, full);
+    let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
+    let err = wasapi_download_client(&server)
+        .download(file, &final_path)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, Error::InvalidRangeResponse { .. }));
+    assert_eq!(std::fs::read(&part_path).unwrap(), prefix);
+    assert!(!final_path.exists());
+}
+
+#[tokio::test]
+async fn download_rejects_resumed_response_with_mismatched_content_range_total() {
+    let server = MockServer::start().await;
+    let full = b"abcdefghij";
+    let prefix = &full[..3];
+    let suffix = &full[3..];
+
+    let dir = TempDir::new().unwrap();
+    let part_path = dir.path().join("ARCHIVEIT-1.warc.gz.part");
+    std::fs::write(&part_path, prefix).unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .and(header("range", "bytes=3-"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("content-range", "bytes 3-9/11")
+                .set_body_bytes(suffix.to_vec()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let file = wasapi_file_at(&server, full);
+    let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
+    let err = wasapi_download_client(&server)
+        .download(file, &final_path)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, Error::InvalidRangeResponse { .. }));
+    assert_eq!(std::fs::read(&part_path).unwrap(), prefix);
+    assert!(!final_path.exists());
+}
+
+#[tokio::test]
 async fn download_restarts_when_server_ignores_range() {
     let server = MockServer::start().await;
     let full = b"abcdefghij";
