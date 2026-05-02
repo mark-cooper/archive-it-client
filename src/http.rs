@@ -10,30 +10,6 @@ use crate::{Config, Error, PageOpts};
 
 pub(crate) const STREAM_PAGE_SIZE: u32 = 100;
 
-pub(crate) fn paginated<'a, F, Fut, T>(
-    fetcher: F,
-) -> impl Stream<Item = Result<T, Error>> + Send + 'a
-where
-    F: Fn(PageOpts) -> Fut + Send + 'a,
-    Fut: Future<Output = Result<Vec<T>, Error>> + Send + 'a,
-    T: Send + 'a,
-{
-    async_stream::try_stream! {
-        let mut offset: u32 = 0;
-        loop {
-            let batch = fetcher(PageOpts {
-                limit: Some(STREAM_PAGE_SIZE),
-                offset: Some(offset),
-            })
-            .await?;
-            let n = batch.len() as u32;
-            for item in batch { yield item; }
-            if n < STREAM_PAGE_SIZE { break; }
-            offset += n;
-        }
-    }
-}
-
 pub(crate) struct Transport {
     backoff: Duration,
     base_url: Url,
@@ -130,6 +106,30 @@ impl Transport {
             return Err(Error::Status(status));
         }
         Ok(resp)
+    }
+}
+
+pub(crate) fn paginated<'a, F, Fut, T>(
+    fetcher: F,
+) -> impl Stream<Item = Result<T, Error>> + Send + 'a
+where
+    F: Fn(PageOpts) -> Fut + Send + 'a,
+    Fut: Future<Output = Result<Vec<T>, Error>> + Send + 'a,
+    T: Send + 'a,
+{
+    async_stream::try_stream! {
+        let mut offset: u32 = 0;
+        loop {
+            let batch = fetcher(PageOpts {
+                limit: Some(STREAM_PAGE_SIZE),
+                offset: Some(offset),
+            })
+            .await?;
+            let n = batch.len() as u32;
+            for item in batch { yield item; }
+            if n < STREAM_PAGE_SIZE { break; }
+            offset += n;
+        }
     }
 }
 
