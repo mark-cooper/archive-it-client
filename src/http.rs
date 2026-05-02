@@ -35,11 +35,11 @@ where
 }
 
 pub(crate) struct Transport {
-    client: reqwest::Client,
+    backoff: Duration,
     base_url: Url,
+    client: reqwest::Client,
     creds: Option<(String, String)>,
     max_attempts: u32,
-    backoff: Duration,
 }
 
 impl Transport {
@@ -48,11 +48,11 @@ impl Transport {
             .read_timeout(cfg.timeout)
             .build()?;
         Ok(Self {
-            client,
+            backoff: cfg.backoff,
             base_url: Url::parse(&cfg.base_url)?,
+            client,
             creds,
             max_attempts: cfg.max_attempts.max(1),
-            backoff: cfg.backoff,
         })
     }
 
