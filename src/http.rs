@@ -44,13 +44,23 @@ impl Transport {
     {
         let url = self.base_url.join(path)?;
         let resp = self
-            .get_response_with_query(&self.json_client, url, query)
+            .get_response_with_query(&self.json_client, url, query, None)
             .await?;
         Ok(resp.json().await?)
     }
 
     pub(crate) async fn get_response(&self, url: Url) -> Result<reqwest::Response, Error> {
-        self.get_response_with_query(&self.download_client, url, &())
+        self.get_response_with_query(&self.download_client, url, &(), None)
+            .await
+    }
+
+    pub(crate) async fn get_response_range(
+        &self,
+        url: Url,
+        from: u64,
+    ) -> Result<reqwest::Response, Error> {
+        let range = if from > 0 { Some(from) } else { None };
+        self.get_response_with_query(&self.download_client, url, &(), range)
             .await
     }
 
@@ -59,6 +69,7 @@ impl Transport {
         client: &reqwest::Client,
         url: Url,
         query: &Q,
+        range_from: Option<u64>,
     ) -> Result<reqwest::Response, Error>
     where
         Q: Serialize + ?Sized,
@@ -68,7 +79,7 @@ impl Transport {
 
         loop {
             attempts_left -= 1;
-            let result = self.attempt(client, &url, query).await;
+            let result = self.attempt(client, &url, query, range_from).await;
 
             if attempts_left == 0 {
                 return result;
@@ -89,11 +100,15 @@ impl Transport {
         client: &reqwest::Client,
         url: &Url,
         query: &Q,
+        range_from: Option<u64>,
     ) -> Result<reqwest::Response, Error>
     where
         Q: Serialize + ?Sized,
     {
         let mut req = client.get(url.clone()).query(query);
+        if let Some(from) = range_from {
+            req = req.header(reqwest::header::RANGE, format!("bytes={}-", from));
+        }
         if let Some((u, p)) = &self.creds {
             req = req.basic_auth(u, Some(p));
         }

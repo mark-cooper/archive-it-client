@@ -89,12 +89,52 @@ impl WasapiClient {
         let path = path.as_ref().to_path_buf();
         async_stream::try_stream! {
             let url = self.primary_location_url(&file)?;
-            let mut response = self.transport.get_response(url.clone()).await?;
             let partial_path = partial_path(&path)?;
-            let mut out = tokio::fs::File::create(&partial_path).await?;
-            let mut hasher = Sha1::new();
-            let mut received: u64 = 0;
+
+            let (mut resume_from, mut hasher) = examine_partial(&partial_path, file.size).await?;
+
+            if resume_from == file.size {
+                let actual_sha1 = format!("{:x}", hasher.finalize());
+                if actual_sha1 != file.checksums.sha1 {
+                    Err(Error::ChecksumMismatch {
+                        url: url.to_string(),
+                        expected: file.checksums.sha1.clone(),
+                        actual: actual_sha1,
+                    })?;
+                }
+                tokio::fs::rename(&partial_path, &path).await?;
+                yield DownloadOutcome::Downloaded { file, path };
+                return;
+            }
+
+            let mut response = self.transport.get_response_range(url.clone(), resume_from).await?;
+
+            if resume_from > 0 && response.status() == reqwest::StatusCode::OK {
+                tokio::fs::remove_file(&partial_path).await?;
+                resume_from = 0;
+                hasher = Sha1::new();
+            }
+
+            let mut out = if resume_from > 0 {
+                tokio::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&partial_path)
+                    .await?
+            } else {
+                tokio::fs::File::create(&partial_path).await?
+            };
+
+            let mut received: u64 = resume_from;
             let mut last_progress: Option<Instant> = None;
+
+            if resume_from > 0 {
+                yield DownloadOutcome::Progress {
+                    file: file.clone(),
+                    received,
+                    total: file.size,
+                };
+                last_progress = Some(Instant::now());
+            }
 
             while let Some(chunk) = response.chunk().await? {
                 hasher.update(&chunk);
@@ -200,8 +240,13 @@ async fn existing_sha1_matches(path: &Path, expected: &str) -> Result<bool, Erro
     if !tokio::fs::try_exists(path).await? {
         return Ok(false);
     }
-    let mut f = tokio::fs::File::open(path).await?;
     let mut hasher = Sha1::new();
+    seed_hasher_from_file(path, &mut hasher).await?;
+    Ok(format!("{:x}", hasher.finalize()) == expected)
+}
+
+async fn seed_hasher_from_file(path: &Path, hasher: &mut Sha1) -> Result<(), Error> {
+    let mut f = tokio::fs::File::open(path).await?;
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = f.read(&mut buf).await?;
@@ -210,7 +255,23 @@ async fn existing_sha1_matches(path: &Path, expected: &str) -> Result<bool, Erro
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()) == expected)
+    Ok(())
+}
+
+async fn examine_partial(partial_path: &Path, expected_size: u64) -> Result<(u64, Sha1), Error> {
+    if !tokio::fs::try_exists(partial_path).await? {
+        return Ok((0, Sha1::new()));
+    }
+    let m = tokio::fs::metadata(partial_path).await?;
+    if m.len() > expected_size {
+        tokio::fs::remove_file(partial_path).await?;
+        return Ok((0, Sha1::new()));
+    }
+    let mut hasher = Sha1::new();
+    if m.len() > 0 {
+        seed_hasher_from_file(partial_path, &mut hasher).await?;
+    }
+    Ok((m.len(), hasher))
 }
 
 fn partial_path(path: &Path) -> Result<PathBuf, Error> {

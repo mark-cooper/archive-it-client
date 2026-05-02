@@ -487,6 +487,142 @@ async fn download_returns_checksum_mismatch() {
 }
 
 #[tokio::test]
+async fn download_resumes_from_existing_partial() {
+    let server = MockServer::start().await;
+    let full = b"abcdefghij";
+    let prefix = &full[..3];
+    let suffix = &full[3..];
+
+    let dir = TempDir::new().unwrap();
+    let part_path = dir.path().join("ARCHIVEIT-1.warc.gz.part");
+    std::fs::write(&part_path, prefix).unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .and(header("range", "bytes=3-"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("content-range", format!("bytes 3-9/{}", full.len()))
+                .set_body_bytes(suffix.to_vec()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let file = wasapi_file_at(&server, full);
+    let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
+    wasapi_download_client(&server)
+        .download(file, &final_path)
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(&final_path).unwrap(), full);
+    assert!(!part_path.exists());
+}
+
+#[tokio::test]
+async fn download_restarts_when_server_ignores_range() {
+    let server = MockServer::start().await;
+    let full = b"abcdefghij";
+    let prefix = &full[..3];
+
+    let dir = TempDir::new().unwrap();
+    let part_path = dir.path().join("ARCHIVEIT-1.warc.gz.part");
+    std::fs::write(&part_path, prefix).unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(full.to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let file = wasapi_file_at(&server, full);
+    let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
+    wasapi_download_client(&server)
+        .download(file, &final_path)
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(&final_path).unwrap(), full);
+    assert!(!part_path.exists());
+}
+
+#[tokio::test]
+async fn download_finalizes_existing_complete_part_without_http() {
+    let server = MockServer::start().await;
+    let full = b"abcdefghij";
+
+    let dir = TempDir::new().unwrap();
+    let part_path = dir.path().join("ARCHIVEIT-1.warc.gz.part");
+    std::fs::write(&part_path, full).unwrap();
+
+    let file = wasapi_file_at(&server, full);
+    let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
+    wasapi_download_client(&server)
+        .download(file, &final_path)
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(&final_path).unwrap(), full);
+    assert!(!part_path.exists());
+    let received = server.received_requests().await.unwrap();
+    assert!(
+        received
+            .iter()
+            .all(|r| r.url.path() != "/warcs/foo.warc.gz")
+    );
+}
+
+#[tokio::test]
+async fn download_errors_on_complete_part_with_wrong_sha1() {
+    let server = MockServer::start().await;
+    let expected = b"abcdefghij";
+    let actual_on_disk = b"ABCDEFGHIJ";
+
+    let dir = TempDir::new().unwrap();
+    let part_path = dir.path().join("ARCHIVEIT-1.warc.gz.part");
+    std::fs::write(&part_path, actual_on_disk).unwrap();
+
+    let file = wasapi_file_at(&server, expected);
+    let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
+    let err = wasapi_download_client(&server)
+        .download(file, &final_path)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, Error::ChecksumMismatch { .. }));
+    assert!(!final_path.exists());
+}
+
+#[tokio::test]
+async fn download_restarts_when_part_is_oversized() {
+    let server = MockServer::start().await;
+    let full = b"abcdefghij";
+    let oversized = b"abcdefghijklmnop";
+
+    let dir = TempDir::new().unwrap();
+    let part_path = dir.path().join("ARCHIVEIT-1.warc.gz.part");
+    std::fs::write(&part_path, oversized).unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(full.to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let file = wasapi_file_at(&server, full);
+    let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
+    wasapi_download_client(&server)
+        .download(file, &final_path)
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(&final_path).unwrap(), full);
+}
+
+#[tokio::test]
 async fn download_returns_primary_location_missing() {
     let server = MockServer::start().await;
     let mut file = wasapi_file_at(&server, b"x");
