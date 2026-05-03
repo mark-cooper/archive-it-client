@@ -15,10 +15,11 @@ use crate::models::wasapi::{Page, WasapiFile};
 use crate::{Config, Error};
 
 pub const PRIMARY_LOCATION_SRC: &str = "https://warcs.archive-it.org";
+pub const DEFAULT_WEBDATA_PAGE_SIZE: u32 = 50;
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WebdataQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
@@ -40,6 +41,23 @@ pub struct WebdataQuery {
     pub page: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
+}
+
+impl Default for WebdataQuery {
+    fn default() -> Self {
+        Self {
+            filename: None,
+            filetype: None,
+            collection: None,
+            crawl: None,
+            crawl_time_after: None,
+            crawl_time_before: None,
+            crawl_start_after: None,
+            crawl_start_before: None,
+            page: None,
+            page_size: Some(DEFAULT_WEBDATA_PAGE_SIZE),
+        }
+    }
 }
 
 pub struct WasapiClient {
@@ -85,7 +103,8 @@ impl WasapiClient {
             let mut files = pin!(self.webdata(query));
             while let Some(file) = files.try_next().await? {
                 let path = dir.join(&file.filename);
-                if existing_sha1_matches(&path, &file.checksums.sha1).await? {
+                let expected_sha1 = self.required_sha1(&file)?;
+                if existing_sha1_matches(&path, expected_sha1).await? {
                     yield DownloadOutcome::Skipped { file, path };
                     continue;
                 }
@@ -115,14 +134,15 @@ impl WasapiClient {
         async_stream::try_stream! {
             let url = self.primary_location_url(&file)?;
             let partial_path = partial_path(&path)?;
+            let expected_sha1 = self.required_sha1(&file)?;
 
             let mut state = match prepare_partial_download(&partial_path, file.size).await? {
                 DownloadState::Complete { hasher } => {
                     let actual_sha1 = format!("{:x}", hasher.finalize());
-                    if actual_sha1 != file.checksums.sha1 {
+                    if actual_sha1 != expected_sha1 {
                         Err(Error::ChecksumMismatch {
                             url: url.to_string(),
-                            expected: file.checksums.sha1.clone(),
+                            expected: expected_sha1.to_owned(),
                             actual: actual_sha1,
                         })?;
                     }
@@ -212,7 +232,7 @@ impl WasapiClient {
                     &partial_path,
                     &path,
                     file.size,
-                    &file.checksums.sha1,
+                    expected_sha1,
                     &url,
                 )
                 .await?;
@@ -251,15 +271,30 @@ impl WasapiClient {
         }
     }
 
-    fn primary_location_url(&self, file: &WasapiFile) -> Result<Url, Error> {
-        let location = file
-            .locations
+    pub fn primary_location<'a>(&self, file: &'a WasapiFile) -> Option<&'a str> {
+        file.locations
             .iter()
             .find(|location| location.starts_with(&self.primary_location_src))
-            .ok_or_else(|| Error::PrimaryLocationMissing {
-                filename: file.filename.clone(),
-            })?;
+            .map(String::as_str)
+    }
+
+    fn primary_location_url(&self, file: &WasapiFile) -> Result<Url, Error> {
+        let location =
+            self.primary_location(file)
+                .ok_or_else(|| Error::PrimaryLocationMissing {
+                    filename: file.filename.clone(),
+                })?;
         Ok(Url::parse(location)?)
+    }
+
+    fn required_sha1<'a>(&self, file: &'a WasapiFile) -> Result<&'a str, Error> {
+        file.checksums
+            .sha1
+            .as_deref()
+            .ok_or_else(|| Error::MissingChecksum {
+                filename: file.filename.clone(),
+                algorithm: "sha1",
+            })
     }
 }
 
@@ -501,6 +536,7 @@ async fn verify_and_finalize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::wasapi::Checksums;
 
     #[test]
     fn partial_path_appends_part_suffix() {
@@ -512,5 +548,36 @@ mod tests {
     fn partial_path_rejects_path_with_no_filename() {
         let err = partial_path(Path::new("/")).unwrap_err();
         assert!(matches!(err, Error::InvalidDownloadPath { .. }));
+    }
+
+    #[test]
+    fn primary_location_uses_configured_source_prefix() {
+        let client = WasapiClient::new("u", "p")
+            .unwrap()
+            .with_primary_location_src("https://example.invalid");
+        let file = WasapiFile {
+            filename: "ARCHIVEIT-1.warc.gz".into(),
+            filetype: "warc".into(),
+            checksums: Checksums {
+                sha1: Some("sha1".into()),
+                md5: Some("md5".into()),
+            },
+            account: 1,
+            size: 1,
+            collection: 1,
+            crawl: Some(1),
+            crawl_time: Some("2020-01-01T00:00:00Z".into()),
+            crawl_start: Some("2020-01-01T00:00:00Z".into()),
+            store_time: "2020-01-01T00:00:00Z".into(),
+            locations: vec![
+                "https://other.example.com/warcs/foo.warc.gz".into(),
+                "https://example.invalid/warcs/foo.warc.gz".into(),
+            ],
+        };
+
+        assert_eq!(
+            client.primary_location(&file),
+            Some("https://example.invalid/warcs/foo.warc.gz")
+        );
     }
 }

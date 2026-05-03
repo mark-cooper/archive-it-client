@@ -386,15 +386,15 @@ fn wasapi_file_at(server: &MockServer, content: &[u8]) -> WasapiFile {
         filename: "ARCHIVEIT-1.warc.gz".into(),
         filetype: "warc".into(),
         checksums: Checksums {
-            sha1: format!("{:x}", Sha1::digest(content)),
-            md5: String::new(),
+            sha1: Some(format!("{:x}", Sha1::digest(content))),
+            md5: Some(String::new()),
         },
         account: 1,
         size: content.len() as u64,
         collection: 4472,
-        crawl: 1234,
-        crawl_time: "2025-01-01T00:00:00Z".into(),
-        crawl_start: "2025-01-01T00:00:00Z".into(),
+        crawl: Some(1234),
+        crawl_time: Some("2025-01-01T00:00:00Z".into()),
+        crawl_start: Some("2025-01-01T00:00:00Z".into()),
         store_time: "2025-01-01T00:00:00Z".into(),
         locations: vec![format!("{}/warcs/foo.warc.gz", server.uri())],
     }
@@ -475,7 +475,7 @@ async fn download_returns_checksum_mismatch() {
         .await;
 
     let mut file = wasapi_file_at(&server, content);
-    file.checksums.sha1 = "0000000000000000000000000000000000000000".into();
+    file.checksums.sha1 = Some("0000000000000000000000000000000000000000".into());
 
     let dir = TempDir::new().unwrap();
     let out = dir.path().join("out.warc.gz");
@@ -780,6 +780,28 @@ fn wasapi_file_json(f: &WasapiFile) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn download_requires_sha1_checksum() {
+    let server = MockServer::start().await;
+    let mut file = wasapi_file_at(&server, b"x");
+    file.checksums.sha1 = None;
+
+    let dir = TempDir::new().unwrap();
+    let out = dir.path().join("out.warc.gz");
+    let err = wasapi_download_client(&server)
+        .download(file, &out)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        Error::MissingChecksum {
+            algorithm: "sha1",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 async fn download_collection_writes_files_and_emits_downloaded() {
     use futures::TryStreamExt;
 
@@ -973,10 +995,11 @@ async fn download_collection_creates_missing_directory() {
 }
 
 #[tokio::test]
-async fn wasapi_omits_unset_query_parameters() {
+async fn wasapi_applies_default_page_size() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/webdata"))
+        .and(query_param("page_size", "50"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "count": 0, "next": null, "previous": null, "files": [],
         })))
@@ -986,7 +1009,4 @@ async fn wasapi_omits_unset_query_parameters() {
 
     let client = WasapiClient::with_config("u", "p", wasapi_config(&server)).unwrap();
     client.list_webdata(&WebdataQuery::default()).await.unwrap();
-
-    let received = server.received_requests().await.unwrap();
-    assert_eq!(received[0].url.query(), None);
 }

@@ -19,6 +19,11 @@ pub enum Error {
     InvalidRangeResponse { url: String, details: String },
     #[error("I/O failed: {0}")]
     Io(#[from] io::Error),
+    #[error("missing {algorithm} checksum for {filename}")]
+    MissingChecksum {
+        filename: String,
+        algorithm: &'static str,
+    },
     #[error("resource not found: {0}")]
     NotFound(String),
     #[error("no primary WARC location for {filename}")]

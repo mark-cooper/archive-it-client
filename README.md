@@ -102,7 +102,9 @@ The streaming methods are:
 | `PartnerClient` | `collections()` |
 | `WasapiClient` | `webdata(query: WebdataQuery)` |
 
-Internally they fetch 100 items per request.
+Internally, `PublicClient` and `PartnerClient` streams fetch 100 items per
+request. `WasapiClient` defaults to `page_size=50` unless you override it in
+`WebdataQuery`.
 
 The streams expose the standard `futures_core::Stream` trait. To use the
 extension methods shown above (`try_collect`, `try_next`, `try_filter`, `take`,
@@ -152,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Examples
 
-Three runnable examples live under `examples/`, one per client:
+Runnable examples live under `examples/`:
 
 ```bash
 # no auth — public partner registry
@@ -163,6 +165,9 @@ ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example partner
 
 # wasapi — needs ARCHIVE_IT_USERNAME/ARCHIVE_IT_PASSWORD set
 ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example wasapi
+
+# inventory every WARC exposed by WASAPI into ./warcs.csv
+ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example warcs_inventory
 ```
 
 The authenticated examples fail fast if `ARCHIVE_IT_USERNAME` or
