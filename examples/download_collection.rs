@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::pin::pin;
 
@@ -23,8 +24,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut stream = pin!(client.download_collection(query, &dir));
+    let mut showed_progress = false;
     while let Some(outcome) = stream.try_next().await? {
-        println!("{outcome}");
+        match &outcome {
+            DownloadOutcome::Progress { .. } => {
+                print!("\r\x1b[2K{outcome}");
+                io::stdout().flush()?;
+                showed_progress = true;
+            }
+            _ => {
+                if showed_progress {
+                    println!();
+                    showed_progress = false;
+                }
+                println!("{outcome}");
+            }
+        }
         // Example short-circuit: stop after the first file's terminal event
         // (Downloaded / Skipped / Failed) so the demo doesn't pull the entire
         // collection. Drop this break to download all.
