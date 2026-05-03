@@ -16,6 +16,7 @@ pub use partner::PartnerClient;
 pub use public::PublicClient;
 pub use wasapi::{DownloadOutcome, WasapiClient, WebdataQuery};
 
+#[cfg(feature = "s3")]
 /// User-facing types for the S3 download destination.
 ///
 /// Construct an [`aws_sdk_s3::Client`] and pass it to

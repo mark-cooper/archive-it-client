@@ -6,9 +6,13 @@ authors = ["Mark Cooper <gh.aftermath967@passinbox.com>"]
 description = "Rust client for Archive-It's partner API and WASAPI"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = []
+s3 = ["dep:aws-sdk-s3"]
+
 [dependencies]
 async-stream = "0.3"
-aws-sdk-s3 = { version = "1", default-features = false, features = [
+aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = [
   "behavior-version-latest",
   "rt-tokio",
 ] }

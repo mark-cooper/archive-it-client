@@ -2,6 +2,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 
+#[cfg(feature = "s3")]
 use aws_sdk_s3::Client as AwsS3Client;
 use futures_core::Stream;
 use futures_util::TryStreamExt;
@@ -9,6 +10,7 @@ use serde::Serialize;
 use url::Url;
 
 use crate::downloads::local::LocalSink;
+#[cfg(feature = "s3")]
 use crate::downloads::s3::{S3Location, S3Sink};
 use crate::downloads::{self, DownloadEvent, DownloadLocation};
 use crate::http::Transport;
@@ -137,6 +139,7 @@ impl WasapiClient {
         }
     }
 
+    #[cfg(feature = "s3")]
     pub async fn download_to_s3(
         &self,
         file: WasapiFile,
@@ -150,6 +153,7 @@ impl WasapiClient {
         Ok(())
     }
 
+    #[cfg(feature = "s3")]
     pub fn download_collection_to_s3<K>(
         &self,
         query: WebdataQuery,
