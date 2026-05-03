@@ -37,6 +37,7 @@ tokio = { version = "1", default-features = false, features = [
 url = "2"
 
 [dev-dependencies]
+aws-config = "1"
 aws-credential-types = "1"
 aws-smithy-http-client = { version = "1", features = ["test-util"] }
 aws-smithy-types = "1"
@@ -45,3 +46,7 @@ http = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
+
+[[example]]
+name = "download_s3"
+required-features = ["s3"]
