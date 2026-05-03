@@ -2,6 +2,12 @@
 
 Rust client for Archive-It's partner API and WASAPI.
 
+Inspiration and examples have been drawn from:
+
+- <https://github.com/sul-dlss/wasapi_client>
+- <https://github.com/unt-libraries/py-wasapi-client>
+- <https://github.com/WASAPI-Community/data-transfer-apis/tree/master/ait-specification>
+
 ## Overview
 
 There are three clients, each scoped to what its endpoints expose under that auth state:
@@ -96,11 +102,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 The streaming methods are:
 
-| Client | Method |
-| --- | --- |
-| `PublicClient` | `accounts()`, `collections(account_id: Option<u64>)` |
-| `PartnerClient` | `collections()` |
-| `WasapiClient` | `webdata(query: WebdataQuery)` |
+| Client          | Method                                               |
+| --------------- | ---------------------------------------------------- |
+| `PublicClient`  | `accounts()`, `collections(account_id: Option<u64>)` |
+| `PartnerClient` | `collections()`                                      |
+| `WasapiClient`  | `webdata(query: WebdataQuery)`                       |
 
 Internally, `PublicClient` and `PartnerClient` streams fetch 100 items per
 request. `WasapiClient` defaults to `page_size=50` unless you override it in
@@ -152,6 +158,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Downloads
+
+Two destinations: local filesystem (always available) and S3 (behind the `s3`
+feature). Both skip the fetch when the destination already matches — by sha1
+when WASAPI supplied one, otherwise by file size.
+
+```rust,no_run
+use std::pin::pin;
+use archive_it_client::{WasapiClient, WebdataQuery};
+use futures::TryStreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let wasapi = WasapiClient::new("user", "pass")?;
+
+    // single file → ./out.warc.gz
+    let file = pin!(wasapi.webdata(WebdataQuery {
+        collection: Some(4472),
+        page_size: Some(1),
+        ..Default::default()
+    }))
+    .try_next().await?.ok_or("empty")?;
+    wasapi.download(file, "./out.warc.gz").await?;
+
+    // streaming: emits Progress / Downloaded / Skipped / Failed per file
+    let query = WebdataQuery { collection: Some(4472), ..Default::default() };
+    let mut stream = pin!(wasapi.download_collection(query, "./warcs"));
+    while let Some(outcome) = stream.try_next().await? {
+        println!("{outcome}");
+    }
+    Ok(())
+}
+```
+
+Local downloads use a `<filename>.part` sidecar so an interrupted run resumes
+on the next invocation.
+
+### S3
+
+Enable the `s3` feature:
+
+```toml
+[dependencies]
+archive-it-client = { version = "0.1", features = ["s3"] }
+```
+
+`WasapiClient::download_to_s3` and `download_collection_to_s3` accept a
+pre-built `aws_sdk_s3::Client`, so credentials, region, and HTTP wiring stay
+under your control. Multipart upload is driven internally with server-side
+crc64nvme as the at-rest integrity contract; sha1 (when supplied by WASAPI)
+is recorded as user metadata so subsequent runs can skip on match.
+
+The S3 principal needs `s3:GetObject`, `s3:ListBucket`, `s3:PutObject`, and
+`s3:AbortMultipartUpload` on the target.
+
 ## Examples
 
 Runnable examples live under `examples/`:
@@ -168,6 +229,16 @@ ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example wasapi
 
 # inventory every WARC exposed by WASAPI into ./warcs.csv
 ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example warcs_inventory
+
+# tally total WARC bytes across every collection on the account
+ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example count_bytes
+
+# download a collection to ./warcs (resumes via .part sidecars)
+ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example download_collection
+
+# upload one WARC to S3 (uses standard AWS provider chain for creds)
+ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass S3_BUCKET=my-bucket \
+    cargo run --features s3 --example download_s3
 ```
 
 The authenticated examples fail fast if `ARCHIVE_IT_USERNAME` or
