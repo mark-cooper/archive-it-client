@@ -13,6 +13,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = WasapiClient::new(user, pass)?;
     let dir = PathBuf::from("./warcs");
+    // page_size: 1 keeps the listing roundtrip small — paired with the early
+    // break below so the example exits after the first file. Real usage
+    // would leave page_size at its default and iterate to completion.
     let query = WebdataQuery {
         collection: Some(4472),
         page_size: Some(1),
@@ -20,43 +23,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut stream = pin!(client.download_collection(query, &dir));
-    loop {
-        match stream.try_next().await? {
-            Some(DownloadOutcome::Progress {
-                file,
-                received,
-                total,
-            }) => {
-                let pct = (received as f64 / total as f64) * 100.0;
-                println!(
-                    "  {}: {:.1}% ({} / {} bytes)",
-                    file.filename, pct, received, total
-                );
-            }
-            Some(DownloadOutcome::Downloaded { path, file }) => {
-                println!("downloaded {} ({} bytes)", path.display(), file.size);
-                break;
-            }
-            Some(DownloadOutcome::DownloadedUnverified { path, file }) => {
-                println!(
-                    "downloaded {} without verification ({})",
-                    path.display(),
-                    file.size
-                );
-                break;
-            }
-            Some(DownloadOutcome::Failed { file, error }) => {
-                println!("failed {}: {}", file.filename, error);
-                break;
-            }
-            Some(DownloadOutcome::Skipped { path, .. }) => {
-                println!("skipped {} (already present)", path.display());
-                break;
-            }
-            None => {
-                println!("no files matched query");
-                break;
-            }
+    while let Some(outcome) = stream.try_next().await? {
+        println!("{outcome}");
+        // Example short-circuit: stop after the first file's terminal event
+        // (Downloaded / DownloadedUnverified / Skipped / Failed) so the demo
+        // doesn't pull the entire collection. Drop this break to download all.
+        if !matches!(outcome, DownloadOutcome::Progress { .. }) {
+            break;
         }
     }
 

@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+mod downloads;
 mod error;
 mod http;
 pub mod models;

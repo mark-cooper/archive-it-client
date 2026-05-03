@@ -59,11 +59,6 @@ impl Transport {
         Ok(resp.json().await?)
     }
 
-    pub(crate) async fn get_response(&self, url: Url) -> Result<reqwest::Response, Error> {
-        self.get_response_with_query(&self.download_client, url, &(), None)
-            .await
-    }
-
     pub(crate) async fn get_response_range(
         &self,
         url: Url,

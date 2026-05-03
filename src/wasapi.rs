@@ -1,23 +1,20 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
-use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use futures_core::Stream;
 use futures_util::TryStreamExt;
 use serde::Serialize;
-use sha1::{Digest, Sha1};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
-use crate::http::{Transport, is_retryable};
+use crate::downloads::local::LocalSink;
+use crate::downloads::{self, DownloadEvent};
+use crate::http::Transport;
 use crate::models::wasapi::{Page, WasapiFile};
 use crate::{Config, Error};
 
 pub const PRIMARY_LOCATION_SRC: &str = "https://warcs.archive-it.org";
 pub const DEFAULT_WEBDATA_PAGE_SIZE: u32 = 50;
-
-const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebdataQuery {
@@ -87,8 +84,10 @@ impl WasapiClient {
     }
 
     pub async fn download(&self, file: WasapiFile, path: impl AsRef<Path>) -> Result<(), Error> {
-        let mut stream = pin!(self.download_with_progress(file, path));
-        while stream.try_next().await?.is_some() {}
+        let url = self.primary_location_url(&file)?;
+        let sink = LocalSink::new(path.as_ref().to_path_buf())?;
+        let mut events = pin!(downloads::run_download(&self.transport, url, file, sink));
+        while events.try_next().await?.is_some() {}
         Ok(())
     }
 
@@ -102,28 +101,26 @@ impl WasapiClient {
             tokio::fs::create_dir_all(&dir).await?;
             let mut files = pin!(self.webdata(query));
             while let Some(file) = files.try_next().await? {
-                let file_for_error = file.clone();
                 let path = dir.join(&file.filename);
-                if let Some(expected_sha1) = file.checksums.sha1.as_deref() {
-                    match existing_sha1_matches(&path, expected_sha1).await {
-                        Ok(true) => {
-                            yield DownloadOutcome::Skipped { file, path };
-                            continue;
-                        }
-                        Ok(false) => {}
-                        Err(error) => {
-                            yield DownloadOutcome::Failed {
-                                file: file_for_error,
-                                error,
-                            };
-                            continue;
-                        }
+                let sink = match LocalSink::new(path) {
+                    Ok(sink) => sink,
+                    Err(error) => {
+                        yield DownloadOutcome::Failed { file, error };
+                        continue;
                     }
-                }
-                let mut inner = pin!(self.download_with_progress(file, path));
+                };
+                let url = match self.primary_location_url(&file) {
+                    Ok(url) => url,
+                    Err(error) => {
+                        yield DownloadOutcome::Failed { file, error };
+                        continue;
+                    }
+                };
+                let file_for_error = file.clone();
+                let mut events = pin!(downloads::run_download(&self.transport, url, file, sink));
                 loop {
-                    match inner.try_next().await {
-                        Ok(Some(event)) => yield event,
+                    match events.try_next().await {
+                        Ok(Some(event)) => yield outcome_from(event),
                         Ok(None) => break,
                         Err(error) => {
                             yield DownloadOutcome::Failed {
@@ -134,140 +131,6 @@ impl WasapiClient {
                         }
                     }
                 }
-            }
-        }
-    }
-
-    pub async fn download_stream(
-        &self,
-        file: WasapiFile,
-    ) -> Result<impl Stream<Item = Result<Bytes, Error>> + Send + 'static, Error> {
-        let url = self.primary_location_url(&file)?;
-        let response = self.transport.get_response(url).await?;
-        Ok(response.bytes_stream().map_err(Error::from))
-    }
-
-    pub fn download_with_progress(
-        &self,
-        file: WasapiFile,
-        path: impl AsRef<Path>,
-    ) -> impl Stream<Item = Result<DownloadOutcome, Error>> + Send + '_ {
-        let path = path.as_ref().to_path_buf();
-        async_stream::try_stream! {
-            let url = self.primary_location_url(&file)?;
-            let partial_path = partial_path(&path)?;
-            let expected_sha1 = file.checksums.sha1.as_deref();
-
-            let mut state = match prepare_partial_download(&partial_path, file.size).await? {
-                DownloadState::Complete { hasher } => {
-                    if let Some(expected_sha1) = expected_sha1 {
-                        let actual_sha1 = format!("{:x}", hasher.finalize());
-                        if actual_sha1 != expected_sha1 {
-                            Err(Error::ChecksumMismatch {
-                                url: url.to_string(),
-                                expected: expected_sha1.to_owned(),
-                                actual: actual_sha1,
-                            })?;
-                        }
-                    }
-                    tokio::fs::rename(&partial_path, &path).await?;
-                    if expected_sha1.is_some() {
-                        yield DownloadOutcome::Downloaded { file, path };
-                    } else {
-                        yield DownloadOutcome::DownloadedUnverified { file, path };
-                    }
-                    return;
-                }
-                DownloadState::InProgress(state) => state,
-            };
-
-            let mut last_progress: Option<Instant> = None;
-            let mut attempts_left = self.transport.max_attempts();
-            let mut delay = self.transport.backoff();
-
-            if state.received > 0 {
-                yield DownloadOutcome::Progress {
-                    file: file.clone(),
-                    received: state.received,
-                    total: file.size,
-                };
-                last_progress = Some(Instant::now());
-            }
-
-            'download: loop {
-                let mut response = self
-                    .transport
-                    .get_response_range(url.clone(), state.received)
-                    .await?;
-
-                if state.received > 0 {
-                    match response.status() {
-                        reqwest::StatusCode::OK => {
-                            state.restart(&partial_path).await?;
-                            attempts_left = self.transport.max_attempts();
-                            delay = self.transport.backoff();
-                        }
-                        reqwest::StatusCode::PARTIAL_CONTENT => {
-                            validate_content_range(&response, state.received, file.size, &url)?;
-                        }
-                        status => {
-                            Err(Error::InvalidRangeResponse {
-                                url: url.to_string(),
-                                details: format!("expected 200 or 206 for resume, got {status}"),
-                            })?;
-                        }
-                    }
-                }
-
-                loop {
-                    let chunk = match response.chunk().await {
-                        Ok(Some(chunk)) => chunk,
-                        Ok(None) => break 'download,
-                        Err(e) => {
-                            let err = Error::from(e);
-                            if attempts_left > 1 && is_retryable(&err) {
-                                attempts_left -= 1;
-                                tokio::time::sleep(delay).await;
-                                delay = delay.saturating_mul(2);
-                                continue 'download;
-                            }
-                            Err(err)?;
-                            unreachable!();
-                        }
-                    };
-
-                    state.write_chunk(&chunk).await?;
-                    attempts_left = self.transport.max_attempts();
-                    delay = self.transport.backoff();
-
-                    let emit = match last_progress {
-                        None => true,
-                        Some(t) => t.elapsed() >= PROGRESS_INTERVAL,
-                    };
-                    if emit {
-                        yield DownloadOutcome::Progress {
-                            file: file.clone(),
-                            received: state.received,
-                            total: file.size,
-                        };
-                        last_progress = Some(Instant::now());
-                    }
-                }
-            }
-
-            state
-                .finalize(
-                    &partial_path,
-                    &path,
-                    file.size,
-                    expected_sha1,
-                    &url,
-                )
-                .await?;
-            if expected_sha1.is_some() {
-                yield DownloadOutcome::Downloaded { file, path };
-            } else {
-                yield DownloadOutcome::DownloadedUnverified { file, path };
             }
         }
     }
@@ -345,242 +208,84 @@ pub enum DownloadOutcome {
     },
 }
 
-enum DownloadState {
-    Complete { hasher: Sha1 },
-    InProgress(PartialDownload),
-}
-
-struct PartialDownload {
-    out: tokio::fs::File,
-    received: u64,
-    hasher: Sha1,
-}
-
-impl PartialDownload {
-    async fn restart(&mut self, partial_path: &Path) -> Result<(), Error> {
-        let replacement = tokio::fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .create(true)
-            .open(partial_path)
-            .await?;
-        let previous = std::mem::replace(&mut self.out, replacement);
-        drop(previous);
-        self.received = 0;
-        self.hasher = Sha1::new();
-        Ok(())
-    }
-
-    async fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), Error> {
-        self.hasher.update(chunk);
-        self.out.write_all(chunk).await?;
-        self.received += chunk.len() as u64;
-        Ok(())
-    }
-
-    async fn finalize(
-        self,
-        partial_path: &Path,
-        final_path: &Path,
-        expected_size: u64,
-        expected_sha1: Option<&str>,
-        url: &Url,
-    ) -> Result<(), Error> {
-        verify_and_finalize(
-            self.out,
-            partial_path,
-            final_path,
-            self.hasher,
-            expected_size,
-            expected_sha1,
-            url,
-        )
-        .await
-    }
-}
-
-async fn existing_sha1_matches(path: &Path, expected: &str) -> Result<bool, Error> {
-    if !tokio::fs::try_exists(path).await? {
-        return Ok(false);
-    }
-    let mut hasher = Sha1::new();
-    seed_hasher_from_file(path, &mut hasher).await?;
-    Ok(format!("{:x}", hasher.finalize()) == expected)
-}
-
-async fn examine_partial(partial_path: &Path, expected_size: u64) -> Result<(u64, Sha1), Error> {
-    if !tokio::fs::try_exists(partial_path).await? {
-        return Ok((0, Sha1::new()));
-    }
-    let m = tokio::fs::metadata(partial_path).await?;
-    if m.len() > expected_size {
-        tokio::fs::remove_file(partial_path).await?;
-        return Ok((0, Sha1::new()));
-    }
-    let mut hasher = Sha1::new();
-    if m.len() > 0 {
-        seed_hasher_from_file(partial_path, &mut hasher).await?;
-    }
-    Ok((m.len(), hasher))
-}
-
-async fn prepare_partial_download(
-    partial_path: &Path,
-    expected_size: u64,
-) -> Result<DownloadState, Error> {
-    let (received, hasher) = examine_partial(partial_path, expected_size).await?;
-    if received == expected_size {
-        return Ok(DownloadState::Complete { hasher });
-    }
-    let out = if received > 0 {
-        tokio::fs::OpenOptions::new()
-            .append(true)
-            .open(partial_path)
-            .await?
-    } else {
-        tokio::fs::File::create(partial_path).await?
-    };
-    Ok(DownloadState::InProgress(PartialDownload {
-        out,
-        received,
-        hasher,
-    }))
-}
-
-async fn seed_hasher_from_file(path: &Path, hasher: &mut Sha1) -> Result<(), Error> {
-    let mut f = tokio::fs::File::open(path).await?;
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = f.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(())
-}
-
-fn partial_path(path: &Path) -> Result<PathBuf, Error> {
-    let mut file_name = path
-        .file_name()
-        .ok_or_else(|| Error::InvalidDownloadPath { path: path.into() })?
-        .to_os_string();
-    file_name.push(".part");
-    Ok(path.with_file_name(file_name))
-}
-
-fn validate_content_range(
-    response: &reqwest::Response,
-    expected_start: u64,
-    expected_total: u64,
-    url: &Url,
-) -> Result<(), Error> {
-    let header = response
-        .headers()
-        .get(reqwest::header::CONTENT_RANGE)
-        .ok_or_else(|| Error::InvalidRangeResponse {
-            url: url.to_string(),
-            details: "missing Content-Range header on 206 response".into(),
-        })?;
-    let value = header.to_str().map_err(|_| Error::InvalidRangeResponse {
-        url: url.to_string(),
-        details: "invalid Content-Range header encoding".into(),
-    })?;
-    let range = value
-        .strip_prefix("bytes ")
-        .ok_or_else(|| Error::InvalidRangeResponse {
-            url: url.to_string(),
-            details: format!("unexpected Content-Range format: {value}"),
-        })?;
-    let (bounds, total) = range
-        .split_once('/')
-        .ok_or_else(|| Error::InvalidRangeResponse {
-            url: url.to_string(),
-            details: format!("unexpected Content-Range format: {value}"),
-        })?;
-    let (start, _) = bounds
-        .split_once('-')
-        .ok_or_else(|| Error::InvalidRangeResponse {
-            url: url.to_string(),
-            details: format!("unexpected Content-Range format: {value}"),
-        })?;
-    let start = start
-        .parse::<u64>()
-        .map_err(|_| Error::InvalidRangeResponse {
-            url: url.to_string(),
-            details: format!("invalid Content-Range start: {value}"),
-        })?;
-    let total = total
-        .parse::<u64>()
-        .map_err(|_| Error::InvalidRangeResponse {
-            url: url.to_string(),
-            details: format!("invalid Content-Range total: {value}"),
-        })?;
-
-    if start != expected_start {
-        return Err(Error::InvalidRangeResponse {
-            url: url.to_string(),
-            details: format!("Content-Range starts at {start}, expected {expected_start}"),
-        });
-    }
-    if total != expected_total {
-        return Err(Error::InvalidRangeResponse {
-            url: url.to_string(),
-            details: format!("Content-Range total is {total}, expected {expected_total}"),
-        });
-    }
-    Ok(())
-}
-
-async fn verify_and_finalize(
-    out: tokio::fs::File,
-    partial_path: &Path,
-    final_path: &Path,
-    hasher: Sha1,
-    expected_size: u64,
-    expected_sha1: Option<&str>,
-    url: &Url,
-) -> Result<(), Error> {
-    out.sync_all().await?;
-    let actual_size = out.metadata().await?.len();
-    drop(out);
-    if actual_size != expected_size {
-        return Err(Error::SizeMismatch {
-            url: url.to_string(),
-            expected: expected_size,
-            actual: actual_size,
-        });
-    }
-    if let Some(expected_sha1) = expected_sha1 {
-        let actual_sha1 = format!("{:x}", hasher.finalize());
-        if actual_sha1 != expected_sha1 {
-            return Err(Error::ChecksumMismatch {
-                url: url.to_string(),
-                expected: expected_sha1.to_string(),
-                actual: actual_sha1,
-            });
+impl fmt::Display for DownloadOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Progress {
+                file,
+                received,
+                total,
+            } => {
+                let pct = if *total == 0 {
+                    100.0
+                } else {
+                    (*received as f64 / *total as f64) * 100.0
+                };
+                write!(
+                    f,
+                    "{}: {pct:.1}% ({received} / {total} bytes)",
+                    file.filename
+                )
+            }
+            Self::Downloaded { file, path } => {
+                write!(f, "downloaded {} ({} bytes)", path.display(), file.size)
+            }
+            Self::DownloadedUnverified { file, path } => {
+                write!(
+                    f,
+                    "downloaded {} ({} bytes, unverified)",
+                    path.display(),
+                    file.size
+                )
+            }
+            Self::Failed { file, error } => {
+                write!(f, "failed {}: {error}", file.filename)
+            }
+            Self::Skipped { path, .. } => {
+                write!(f, "skipped {} (already present)", path.display())
+            }
         }
     }
-    tokio::fs::rename(partial_path, final_path).await?;
-    Ok(())
+}
+
+fn outcome_from(event: DownloadEvent<PathBuf>) -> DownloadOutcome {
+    match event {
+        DownloadEvent::Progress {
+            file,
+            received,
+            total,
+        } => DownloadOutcome::Progress {
+            file,
+            received,
+            total,
+        },
+        DownloadEvent::Skipped { file, location } => DownloadOutcome::Skipped {
+            file,
+            path: location,
+        },
+        DownloadEvent::Downloaded {
+            file,
+            location,
+            verified: true,
+        } => DownloadOutcome::Downloaded {
+            file,
+            path: location,
+        },
+        DownloadEvent::Downloaded {
+            file,
+            location,
+            verified: false,
+        } => DownloadOutcome::DownloadedUnverified {
+            file,
+            path: location,
+        },
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::wasapi::Checksums;
-
-    #[test]
-    fn partial_path_appends_part_suffix() {
-        let result = partial_path(Path::new("/tmp/foo.warc.gz")).unwrap();
-        assert_eq!(result, PathBuf::from("/tmp/foo.warc.gz.part"));
-    }
-
-    #[test]
-    fn partial_path_rejects_path_with_no_filename() {
-        let err = partial_path(Path::new("/")).unwrap_err();
-        assert!(matches!(err, Error::InvalidDownloadPath { .. }));
-    }
 
     #[test]
     fn primary_location_uses_configured_source_prefix() {

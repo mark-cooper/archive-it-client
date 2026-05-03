@@ -741,28 +741,6 @@ async fn download_returns_primary_location_missing() {
     assert!(matches!(err, Error::PrimaryLocationMissing { .. }));
 }
 
-#[tokio::test]
-async fn download_stream_yields_bytes() {
-    use futures::TryStreamExt;
-
-    let server = MockServer::start().await;
-    let content = b"streaming content".to_vec();
-
-    Mock::given(method("GET"))
-        .and(path("/warcs/foo.warc.gz"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone()))
-        .mount(&server)
-        .await;
-
-    let stream = wasapi_download_client(&server)
-        .download_stream(wasapi_file_at(&server, &content))
-        .await
-        .unwrap();
-    let chunks: Vec<bytes::Bytes> = stream.try_collect().await.unwrap();
-    let collected: Vec<u8> = chunks.iter().flat_map(|b| b.iter().copied()).collect();
-    assert_eq!(collected, content);
-}
-
 fn wasapi_file_json(f: &WasapiFile) -> serde_json::Value {
     json!({
         "filename": f.filename,
@@ -777,6 +755,57 @@ fn wasapi_file_json(f: &WasapiFile) -> serde_json::Value {
         "store-time": f.store_time,
         "locations": f.locations,
     })
+}
+
+#[tokio::test]
+async fn download_skips_when_destination_already_matches_sha1() {
+    let server = MockServer::start().await;
+    let content = b"warc bytes";
+    let file = wasapi_file_at(&server, content);
+
+    let dir = TempDir::new().unwrap();
+    let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
+    std::fs::write(&final_path, content).unwrap();
+
+    wasapi_download_client(&server)
+        .download(file, &final_path)
+        .await
+        .unwrap();
+
+    let received = server.received_requests().await.unwrap();
+    assert!(
+        received
+            .iter()
+            .all(|r| r.url.path() != "/warcs/foo.warc.gz"),
+        "expected no GET to the warc URL when destination already matches",
+    );
+    assert_eq!(std::fs::read(&final_path).unwrap(), content);
+}
+
+#[tokio::test]
+async fn download_overwrites_destination_when_sha1_differs() {
+    let server = MockServer::start().await;
+    let expected_content = b"correct content";
+    let stale_content = b"stale content!!";
+
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(expected_content.to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let file = wasapi_file_at(&server, expected_content);
+    let dir = TempDir::new().unwrap();
+    let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
+    std::fs::write(&final_path, stale_content).unwrap();
+
+    wasapi_download_client(&server)
+        .download(file, &final_path)
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(&final_path).unwrap(), expected_content);
 }
 
 #[tokio::test]
