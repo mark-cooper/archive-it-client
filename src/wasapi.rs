@@ -2,13 +2,15 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 
+use aws_sdk_s3::Client as AwsS3Client;
 use futures_core::Stream;
 use futures_util::TryStreamExt;
 use serde::Serialize;
 use url::Url;
 
 use crate::downloads::local::LocalSink;
-use crate::downloads::{self, DownloadEvent};
+use crate::downloads::s3::{S3Location, S3Sink};
+use crate::downloads::{self, DownloadEvent, DownloadLocation};
 use crate::http::Transport;
 use crate::models::wasapi::{Page, WasapiFile};
 use crate::{Config, Error};
@@ -135,6 +137,63 @@ impl WasapiClient {
         }
     }
 
+    pub async fn download_to_s3(
+        &self,
+        file: WasapiFile,
+        s3: AwsS3Client,
+        target: S3Location,
+    ) -> Result<(), Error> {
+        let url = self.primary_location_url(&file)?;
+        let sink = S3Sink::new(s3, target);
+        let mut events = pin!(downloads::run_download(&self.transport, url, file, sink));
+        while events.try_next().await?.is_some() {}
+        Ok(())
+    }
+
+    pub fn download_collection_to_s3<K>(
+        &self,
+        query: WebdataQuery,
+        s3: AwsS3Client,
+        bucket: String,
+        mut key_for: K,
+    ) -> impl Stream<Item = Result<DownloadOutcome<S3Location>, Error>> + Send + '_
+    where
+        K: FnMut(&WasapiFile) -> String + Send + 'static,
+    {
+        async_stream::try_stream! {
+            let mut files = pin!(self.webdata(query));
+            while let Some(file) = files.try_next().await? {
+                let target = S3Location {
+                    bucket: bucket.clone(),
+                    key: key_for(&file),
+                };
+                let sink = S3Sink::new(s3.clone(), target);
+                let url = match self.primary_location_url(&file) {
+                    Ok(url) => url,
+                    Err(error) => {
+                        yield DownloadOutcome::Failed { file, error };
+                        continue;
+                    }
+                };
+                let file_for_error = file.clone();
+                let mut events = pin!(downloads::run_download(&self.transport, url, file, sink));
+                loop {
+                    match events.try_next().await {
+                        Ok(Some(event)) => yield outcome_from(event),
+                        Ok(None) => break,
+                        Err(error) => {
+                            yield DownloadOutcome::Failed {
+                                file: file_for_error,
+                                error,
+                            };
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn list_webdata(&self, query: &WebdataQuery) -> Result<Page<WasapiFile>, Error> {
         self.transport.get_json("webdata", query).await
     }
@@ -184,14 +243,11 @@ impl WasapiClient {
 }
 
 #[derive(Debug)]
-pub enum DownloadOutcome {
+pub enum DownloadOutcome<L = PathBuf> {
     Downloaded {
         file: WasapiFile,
-        path: PathBuf,
-    },
-    DownloadedUnverified {
-        file: WasapiFile,
-        path: PathBuf,
+        location: L,
+        verified: bool,
     },
     Failed {
         file: WasapiFile,
@@ -204,11 +260,11 @@ pub enum DownloadOutcome {
     },
     Skipped {
         file: WasapiFile,
-        path: PathBuf,
+        location: L,
     },
 }
 
-impl fmt::Display for DownloadOutcome {
+impl<L: DownloadLocation> fmt::Display for DownloadOutcome<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Progress {
@@ -227,28 +283,32 @@ impl fmt::Display for DownloadOutcome {
                     file.filename
                 )
             }
-            Self::Downloaded { file, path } => {
-                write!(f, "downloaded {} ({} bytes)", path.display(), file.size)
-            }
-            Self::DownloadedUnverified { file, path } => {
-                write!(
-                    f,
-                    "downloaded {} ({} bytes, unverified)",
-                    path.display(),
-                    file.size
-                )
+            Self::Downloaded {
+                file,
+                location,
+                verified,
+            } => {
+                write!(f, "downloaded ")?;
+                location.fmt_location(f)?;
+                if *verified {
+                    write!(f, " ({} bytes)", file.size)
+                } else {
+                    write!(f, " ({} bytes, unverified)", file.size)
+                }
             }
             Self::Failed { file, error } => {
                 write!(f, "failed {}: {error}", file.filename)
             }
-            Self::Skipped { path, .. } => {
-                write!(f, "skipped {} (already present)", path.display())
+            Self::Skipped { location, .. } => {
+                write!(f, "skipped ")?;
+                location.fmt_location(f)?;
+                write!(f, " (already present)")
             }
         }
     }
 }
 
-fn outcome_from(event: DownloadEvent<PathBuf>) -> DownloadOutcome {
+fn outcome_from<L>(event: DownloadEvent<L>) -> DownloadOutcome<L> {
     match event {
         DownloadEvent::Progress {
             file,
@@ -259,25 +319,15 @@ fn outcome_from(event: DownloadEvent<PathBuf>) -> DownloadOutcome {
             received,
             total,
         },
-        DownloadEvent::Skipped { file, location } => DownloadOutcome::Skipped {
-            file,
-            path: location,
-        },
+        DownloadEvent::Skipped { file, location } => DownloadOutcome::Skipped { file, location },
         DownloadEvent::Downloaded {
             file,
             location,
-            verified: true,
+            verified,
         } => DownloadOutcome::Downloaded {
             file,
-            path: location,
-        },
-        DownloadEvent::Downloaded {
-            file,
             location,
-            verified: false,
-        } => DownloadOutcome::DownloadedUnverified {
-            file,
-            path: location,
+            verified,
         },
     }
 }

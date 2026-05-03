@@ -25,6 +25,8 @@ pub enum Error {
     PrimaryLocationMissing { filename: String },
     #[error("HTTP request failed: {0}")]
     Request(#[from] reqwest::Error),
+    #[error("S3 operation failed: {0}")]
+    S3(Box<dyn std::error::Error + Send + Sync>),
     #[error("downloaded {actual} bytes from {url}; expected {expected}")]
     SizeMismatch {
         url: String,

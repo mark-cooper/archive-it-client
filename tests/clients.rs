@@ -885,14 +885,13 @@ async fn download_collection_emits_downloaded_unverified_and_continues() {
 
     assert!(outcomes.iter().any(|o| matches!(
         o,
-        DownloadOutcome::DownloadedUnverified {
-            file,
-            ..
-        } if file.filename == "missing-sha1.warc.gz"
+        DownloadOutcome::Downloaded { file, verified: false, .. }
+            if file.filename == "missing-sha1.warc.gz"
     )));
     assert!(outcomes.iter().any(|o| matches!(
         o,
-        DownloadOutcome::Downloaded { file, .. } if file.filename == "good.warc.gz"
+        DownloadOutcome::Downloaded { file, verified: true, .. }
+            if file.filename == "good.warc.gz"
     )));
     assert_eq!(
         std::fs::read(dir.path().join("missing-sha1.warc.gz")).unwrap(),

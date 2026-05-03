@@ -1,4 +1,6 @@
+use std::fmt;
 use std::future::Future;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use futures_core::Stream;
@@ -11,8 +13,23 @@ use crate::models::wasapi::WasapiFile;
 
 pub(crate) mod local;
 mod range;
+pub(crate) mod s3;
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Renders a download destination for log lines.
+///
+/// One impl per [`Sink::Location`] — keeps `DownloadOutcome` generic
+/// over destination while sharing a single `Display` impl.
+pub trait DownloadLocation: Send + 'static {
+    fn fmt_location(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+
+impl DownloadLocation for PathBuf {
+    fn fmt_location(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.display())
+    }
+}
 
 pub(crate) trait Sink: Send {
     type Location: Send + 'static;

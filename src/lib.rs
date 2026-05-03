@@ -10,10 +10,21 @@ pub mod partner;
 pub mod public;
 pub mod wasapi;
 
+pub use downloads::DownloadLocation;
 pub use error::Error;
 pub use partner::PartnerClient;
 pub use public::PublicClient;
 pub use wasapi::{DownloadOutcome, WasapiClient, WebdataQuery};
+
+/// User-facing types for the S3 download destination.
+///
+/// Construct an [`aws_sdk_s3::Client`] and pass it to
+/// [`WasapiClient::download_to_s3`] or
+/// [`WasapiClient::download_collection_to_s3`] alongside an
+/// [`S3Location`](s3::S3Location).
+pub mod s3 {
+    pub use crate::downloads::s3::S3Location;
+}
 
 pub const USER_AGENT: &str = concat!("Archive-It-Client (", env!("CARGO_PKG_VERSION"), ")");
 
