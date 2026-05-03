@@ -179,7 +179,7 @@ where
         }
 
         let verified = if let Some(expected) = expected_sha1.as_deref() {
-            let actual = format!("{:x}", hasher.finalize());
+            let actual = crate::sha1_hex(hasher.finalize());
             if actual != expected {
                 Err(Error::ChecksumMismatch {
                     url: url.to_string(),

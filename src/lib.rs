@@ -12,6 +12,7 @@ pub mod wasapi;
 
 pub use downloads::DownloadLocation;
 pub use error::Error;
+
 pub use partner::PartnerClient;
 pub use public::PublicClient;
 pub use wasapi::{DownloadOutcome, WasapiClient, WebdataQuery};
@@ -28,6 +29,14 @@ pub mod s3 {
 }
 
 pub const USER_AGENT: &str = concat!("Archive-It-Client (", env!("CARGO_PKG_VERSION"), ")");
+
+pub fn sha1_hex(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
 pub struct PageOpts {
