@@ -3,7 +3,7 @@ use std::time::Duration;
 use archive_it_client::models::wasapi::{Checksums, WasapiFile};
 use archive_it_client::{
     Config, DownloadOutcome, Error, PageOpts, PartnerClient, PublicClient, USER_AGENT,
-    WasapiClient, WebdataQuery,
+    WasapiClient, WebdataQuery, sha1_hex,
 };
 use serde_json::json;
 use sha1::{Digest, Sha1};
@@ -386,7 +386,7 @@ fn wasapi_file_at(server: &MockServer, content: &[u8]) -> WasapiFile {
         filename: "ARCHIVEIT-1.warc.gz".into(),
         filetype: "warc".into(),
         checksums: Checksums {
-            sha1: Some(format!("{:x}", Sha1::digest(content))),
+            sha1: Some(sha1_hex(Sha1::digest(content))),
             md5: Some(String::new()),
         },
         account: 1,

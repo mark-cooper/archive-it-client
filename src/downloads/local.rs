@@ -92,7 +92,7 @@ async fn existing_matches_destination(path: &Path, file: &WasapiFile) -> Result<
         Some(expected) => {
             let mut hasher = Sha1::new();
             seed_hasher_from_file(path, &mut hasher).await?;
-            Ok(format!("{:x}", hasher.finalize()) == expected)
+            Ok(crate::sha1_hex(hasher.finalize()) == expected)
         }
         None => {
             let m = tokio::fs::metadata(path).await?;
