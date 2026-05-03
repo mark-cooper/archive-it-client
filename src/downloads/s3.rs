@@ -11,14 +11,50 @@
 //! crc64nvme — that's the integrity guarantee.
 //!
 //! When a sha1 is supplied via `WasapiFile::checksums.sha1`, we record
-//! it on the object as user metadata so [`head_sha1`] can return it on
-//! later runs for skip-on-match decisions. sha1 is optional;
-//! crc64nvme is not.
+//! it on the object as user metadata so subsequent runs can compare it
+//! for skip-on-match decisions. sha1 is optional; crc64nvme is not.
+//!
+//! # Skip rules
+//!
+//! Mirrors [`crate::downloads::local::LocalSink`]:
+//! - WASAPI sha1 is Some: skip when the existing object's metadata sha1
+//!   matches.
+//! - WASAPI sha1 is None: skip when the existing object's size matches
+//!   `file.size`. Without a checksum, size is the only cheap server-side
+//!   evidence that the upload would be redundant — re-uploading a
+//!   multi-GB WARC every run is the alternative.
+//!
+//! # IAM permissions
+//!
+//! `prepare()` always issues HeadObject to drive the skip-on-existing rule,
+//! so HeadObject is a hard requirement of this sink. The caller's S3
+//! principal must allow:
+//!
+//! - `s3:GetObject` on the target key — HeadObject is gated on this.
+//! - `s3:ListBucket` on the bucket — without it, S3 returns 403 (not 404)
+//!   for a missing object, which we cannot distinguish from a real
+//!   permission error and which therefore fails fresh uploads. With it,
+//!   the missing case maps to `HeadObjectError::NotFound` and we proceed.
+//! - `s3:PutObject` on the target key — covers CreateMultipartUpload,
+//!   UploadPart, and CompleteMultipartUpload.
+//! - `s3:AbortMultipartUpload` on the target key — used by `restart()`.
+//!
+//! # Aborted multipart uploads
+//!
+//! Interrupted downloads leave an in-progress multipart upload on S3.
+//! We do not auto-abort on Drop or on permanent error: Rust has no
+//! AsyncDrop and best-effort async cleanup from sync paths is brittle.
+//! Configure an `AbortIncompleteMultipartUpload` lifecycle rule on the
+//! target bucket to garbage-collect them.
 
 use std::fmt;
 
 use aws_sdk_s3::Client;
-use aws_sdk_s3::types::CompletedPart;
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::head_object::HeadObjectError;
+use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{ChecksumAlgorithm, CompletedMultipartUpload, CompletedPart};
+use sha1::{Digest, Sha1};
 
 use crate::Error;
 use crate::downloads::{DownloadLocation, Prepared, Sink};
@@ -48,23 +84,18 @@ impl fmt::Display for S3Location {
 // minimum (except the last part) is 5 MiB.
 const MIN_PART_SIZE: usize = 8 * 1024 * 1024;
 const MAX_PARTS: u64 = 10_000;
+const SHA1_METADATA_KEY: &str = "sha1";
 
 pub(crate) struct S3Sink {
-    #[allow(dead_code)]
     client: Client,
-    #[allow(dead_code)]
     target: S3Location,
-    #[allow(dead_code)]
     part_size: usize,
-    #[allow(dead_code)]
+    sha1_meta: Option<String>,
     state: SinkState,
 }
 
-#[allow(dead_code)]
 enum SinkState {
-    /// Pre-prepare or post-skip.
     Idle,
-    /// Multipart upload underway.
     Uploading {
         upload_id: String,
         buffer: Vec<u8>,
@@ -79,8 +110,24 @@ impl S3Sink {
             client,
             target,
             part_size: MIN_PART_SIZE,
+            sha1_meta: None,
             state: SinkState::Idle,
         }
+    }
+
+    async fn create_multipart_upload(&self) -> Result<String, Error> {
+        let mut req = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.target.bucket)
+            .key(&self.target.key)
+            .checksum_algorithm(ChecksumAlgorithm::Crc64Nvme);
+        if let Some(s) = &self.sha1_meta {
+            req = req.metadata(SHA1_METADATA_KEY, s);
+        }
+        let out = req.send().await.map_err(|e| Error::S3(Box::new(e)))?;
+        out.upload_id
+            .ok_or_else(|| Error::S3("create_multipart_upload returned no upload_id".into()))
     }
 }
 
@@ -88,76 +135,200 @@ impl Sink for S3Sink {
     type Location = S3Location;
 
     async fn prepare(&mut self, file: &WasapiFile) -> Result<Prepared<Self::Location>, Error> {
+        let existing = head_existing(&self.client, &self.target.bucket, &self.target.key).await?;
+        let skip = match (file.checksums.sha1.as_deref(), &existing) {
+            (Some(expected), Some(obj)) => obj.sha1.as_deref() == Some(expected),
+            (None, Some(obj)) => obj.size == file.size,
+            _ => false,
+        };
+        if skip {
+            return Ok(Prepared::Skip {
+                location: self.target.clone(),
+            });
+        }
+
+        // Reject zero-byte uploads only after the skip check, so an existing
+        // zero-byte object that already matches can still be skipped.
+        if file.size == 0 {
+            return Err(Error::S3(
+                format!(
+                    "refusing to upload zero-byte file {} via multipart",
+                    file.filename
+                )
+                .into(),
+            ));
+        }
         self.part_size = part_size_for(file.size);
 
-        // 1. Refuse zero-byte files (S3 multipart needs at least one part;
-        //    callers wanting zero-byte support would need a PutObject path).
-        //
-        // 2. If `file.checksums.sha1` is Some AND `head_sha1` returns the
-        //    matching value, return Skip { location: self.target.clone() }.
-        //    Mirrors LocalSink: only sha1 matches count as "skip".
-        //
-        // 3. Otherwise call `client.create_multipart_upload()` configured
-        //    for crc64nvme (and sha1 in metadata if present), stash the
-        //    upload_id in self.state = Uploading { .. }.
-        //
-        // 4. Return Resume { received: 0, partial_sha1: Sha1::new() }.
-        //    We never resume a previous interrupted MPU — that would
-        //    require external persistence of upload_id + part list.
-        todo!("S3Sink::prepare")
+        self.sha1_meta = file.checksums.sha1.clone();
+        let upload_id = self.create_multipart_upload().await?;
+        self.state = SinkState::Uploading {
+            upload_id,
+            buffer: Vec::with_capacity(self.part_size),
+            next_part_number: 1,
+            parts: Vec::new(),
+        };
+        Ok(Prepared::Resume {
+            received: 0,
+            partial_sha1: Sha1::new(),
+        })
     }
 
-    async fn write_chunk(&mut self, _chunk: &[u8]) -> Result<(), Error> {
-        // Append to buffer. While buffer.len() >= self.part_size:
-        //   - drain a part_size slice into a Bytes
-        //   - client.upload_part(...) with the running part_number
-        //   - push CompletedPart { e_tag, checksum_crc64nvme, part_number }
-        //   - increment next_part_number
-        //
-        // Trailing < part_size remainder stays in buffer.
-        todo!("S3Sink::write_chunk")
+    async fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), Error> {
+        let SinkState::Uploading {
+            upload_id,
+            buffer,
+            next_part_number,
+            parts,
+        } = &mut self.state
+        else {
+            panic!("write_chunk before prepare");
+        };
+        buffer.extend_from_slice(chunk);
+        while buffer.len() >= self.part_size {
+            let part_bytes: Vec<u8> = buffer.drain(..self.part_size).collect();
+            let part = upload_part(
+                &self.client,
+                &self.target,
+                upload_id,
+                *next_part_number,
+                part_bytes,
+            )
+            .await?;
+            parts.push(part);
+            *next_part_number += 1;
+        }
+        Ok(())
     }
 
     async fn restart(&mut self) -> Result<(), Error> {
-        // Server returned 200 to our range request — discard everything.
-        // abort_multipart_upload (best-effort, ignore error),
-        // create_multipart_upload again, reset buffer/parts,
-        // next_part_number = 1.
-        todo!("S3Sink::restart")
+        let prev_upload_id = match &self.state {
+            SinkState::Uploading { upload_id, .. } => Some(upload_id.clone()),
+            SinkState::Idle => None,
+        };
+        if let Some(id) = prev_upload_id {
+            let _ = self
+                .client
+                .abort_multipart_upload()
+                .bucket(&self.target.bucket)
+                .key(&self.target.key)
+                .upload_id(id)
+                .send()
+                .await;
+        }
+        let upload_id = self.create_multipart_upload().await?;
+        self.state = SinkState::Uploading {
+            upload_id,
+            buffer: Vec::with_capacity(self.part_size),
+            next_part_number: 1,
+            parts: Vec::new(),
+        };
+        Ok(())
     }
 
     async fn finalize(self) -> Result<Self::Location, Error> {
-        // 1. Flush remaining buffer as the final part (last part has no
-        //    minimum size). If both buffer and parts are empty we shouldn't
-        //    be here — prepare() refuses zero-byte files.
-        //
-        // 2. client.complete_multipart_upload() with the parts list.
-        //
-        // 3. Verify the returned checksum_crc64nvme is non-empty. If it
-        //    isn't, return Error::S3 wrapping a descriptive error —
-        //    server-side crc64nvme is the at-rest integrity contract.
-        //
-        // 4. Engine has already verified our running sha1 against the
-        //    WASAPI-supplied expected value before calling finalize, so
-        //    by this point bytes have been content-verified end-to-end.
-        //
-        // 5. Return self.target.
-        todo!("S3Sink::finalize")
+        let SinkState::Uploading {
+            upload_id,
+            buffer,
+            next_part_number,
+            mut parts,
+        } = self.state
+        else {
+            panic!("finalize before prepare");
+        };
+
+        if !buffer.is_empty() {
+            let part = upload_part(
+                &self.client,
+                &self.target,
+                &upload_id,
+                next_part_number,
+                buffer,
+            )
+            .await?;
+            parts.push(part);
+        }
+
+        if parts.is_empty() {
+            return Err(Error::S3("finalize called with no parts uploaded".into()));
+        }
+
+        let multipart = CompletedMultipartUpload::builder()
+            .set_parts(Some(parts))
+            .build();
+        let out = self
+            .client
+            .complete_multipart_upload()
+            .bucket(&self.target.bucket)
+            .key(&self.target.key)
+            .upload_id(&upload_id)
+            .multipart_upload(multipart)
+            .send()
+            .await
+            .map_err(|e| Error::S3(Box::new(e)))?;
+
+        if out.checksum_crc64_nvme.as_deref().unwrap_or("").is_empty() {
+            return Err(Error::S3(
+                "complete_multipart_upload returned no crc64nvme".into(),
+            ));
+        }
+
+        Ok(self.target)
     }
 }
 
-/// Look up the sha1 we may have previously stored on this object.
-///
-/// Returns `Some(sha1)` if the object exists and carries a recorded sha1,
-/// `None` if the object is missing or no sha1 was attached.
-#[allow(dead_code)]
-async fn head_sha1(_client: &Client, _bucket: &str, _key: &str) -> Result<Option<String>, Error> {
-    // client.head_object().bucket(_bucket).key(_key).send().await
-    //   - NoSuchKey / 404 → Ok(None)
-    //   - other error → Err(Error::S3(...))
-    //   - ok → read sha1 out of metadata (the key we wrote in
-    //     create_multipart_upload). If absent, Ok(None).
-    todo!("head_sha1")
+async fn upload_part(
+    client: &Client,
+    target: &S3Location,
+    upload_id: &str,
+    part_number: i32,
+    bytes: Vec<u8>,
+) -> Result<CompletedPart, Error> {
+    let out = client
+        .upload_part()
+        .bucket(&target.bucket)
+        .key(&target.key)
+        .upload_id(upload_id)
+        .part_number(part_number)
+        .checksum_algorithm(ChecksumAlgorithm::Crc64Nvme)
+        .body(ByteStream::from(bytes))
+        .send()
+        .await
+        .map_err(|e| Error::S3(Box::new(e)))?;
+
+    Ok(CompletedPart::builder()
+        .set_e_tag(out.e_tag)
+        .set_checksum_crc64_nvme(out.checksum_crc64_nvme)
+        .part_number(part_number)
+        .build())
+}
+
+#[derive(Debug)]
+struct ExistingObject {
+    sha1: Option<String>,
+    size: u64,
+}
+
+async fn head_existing(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+) -> Result<Option<ExistingObject>, Error> {
+    match client.head_object().bucket(bucket).key(key).send().await {
+        Ok(out) => {
+            let sha1 = out
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get(SHA1_METADATA_KEY))
+                .cloned();
+            let size = out.content_length.unwrap_or(0).max(0) as u64;
+            Ok(Some(ExistingObject { sha1, size }))
+        }
+        Err(SdkError::ServiceError(e)) if matches!(e.err(), HeadObjectError::NotFound(_)) => {
+            Ok(None)
+        }
+        Err(e) => Err(Error::S3(Box::new(e))),
+    }
 }
 
 fn part_size_for(file_size: u64) -> usize {

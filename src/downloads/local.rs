@@ -28,9 +28,7 @@ impl Sink for LocalSink {
     type Location = PathBuf;
 
     async fn prepare(&mut self, file: &WasapiFile) -> Result<Prepared<Self::Location>, Error> {
-        if let Some(expected) = file.checksums.sha1.as_deref()
-            && existing_sha1_matches(&self.final_path, expected).await?
-        {
+        if existing_matches_destination(&self.final_path, file).await? {
             return Ok(Prepared::Skip {
                 location: self.final_path.clone(),
             });
@@ -81,13 +79,26 @@ impl Sink for LocalSink {
     }
 }
 
-async fn existing_sha1_matches(path: &Path, expected: &str) -> Result<bool, Error> {
+// Skip-existing rule:
+// - sha1 from WASAPI: only a hash match is good enough.
+// - no sha1 from WASAPI: fall back to size match. Re-downloading a
+//   multi-GB WARC every run when WASAPI didn't supply a hash is the
+//   alternative; size is the cheapest evidence we have.
+async fn existing_matches_destination(path: &Path, file: &WasapiFile) -> Result<bool, Error> {
     if !tokio::fs::try_exists(path).await? {
         return Ok(false);
     }
-    let mut hasher = Sha1::new();
-    seed_hasher_from_file(path, &mut hasher).await?;
-    Ok(format!("{:x}", hasher.finalize()) == expected)
+    match file.checksums.sha1.as_deref() {
+        Some(expected) => {
+            let mut hasher = Sha1::new();
+            seed_hasher_from_file(path, &mut hasher).await?;
+            Ok(format!("{:x}", hasher.finalize()) == expected)
+        }
+        None => {
+            let m = tokio::fs::metadata(path).await?;
+            Ok(m.len() == file.size)
+        }
+    }
 }
 
 async fn examine_partial(partial_path: &Path, expected_size: u64) -> Result<(u64, Sha1), Error> {
