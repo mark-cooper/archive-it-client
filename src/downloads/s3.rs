@@ -43,10 +43,11 @@ impl fmt::Display for S3Location {
     }
 }
 
-// TODO: consider making part size configurable via a builder on
-// `WasapiClient` or an `S3SinkConfig`. 8 MiB is a reasonable default;
-// S3's minimum (except the last part) is 5 MiB.
-const PART_SIZE: usize = 8 * 1024 * 1024;
+// TODO: consider making the minimum part size configurable via a builder on
+// `WasapiClient` or an `S3SinkConfig`. 8 MiB is a reasonable floor; S3's
+// minimum (except the last part) is 5 MiB.
+const MIN_PART_SIZE: usize = 8 * 1024 * 1024;
+const MAX_PARTS: u64 = 10_000;
 
 pub(crate) struct S3Sink {
     #[allow(dead_code)]
@@ -77,7 +78,7 @@ impl S3Sink {
         Self {
             client,
             target,
-            part_size: PART_SIZE,
+            part_size: MIN_PART_SIZE,
             state: SinkState::Idle,
         }
     }
@@ -86,11 +87,13 @@ impl S3Sink {
 impl Sink for S3Sink {
     type Location = S3Location;
 
-    async fn prepare(&mut self, _file: &WasapiFile) -> Result<Prepared<Self::Location>, Error> {
+    async fn prepare(&mut self, file: &WasapiFile) -> Result<Prepared<Self::Location>, Error> {
+        self.part_size = part_size_for(file.size);
+
         // 1. Refuse zero-byte files (S3 multipart needs at least one part;
         //    callers wanting zero-byte support would need a PutObject path).
         //
-        // 2. If `_file.checksums.sha1` is Some AND `head_sha1` returns the
+        // 2. If `file.checksums.sha1` is Some AND `head_sha1` returns the
         //    matching value, return Skip { location: self.target.clone() }.
         //    Mirrors LocalSink: only sha1 matches count as "skip".
         //
@@ -155,4 +158,28 @@ async fn head_sha1(_client: &Client, _bucket: &str, _key: &str) -> Result<Option
     //   - ok → read sha1 out of metadata (the key we wrote in
     //     create_multipart_upload). If absent, Ok(None).
     todo!("head_sha1")
+}
+
+fn part_size_for(file_size: u64) -> usize {
+    file_size.div_ceil(MAX_PARTS).max(MIN_PART_SIZE as u64) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn part_size_uses_minimum_for_small_files() {
+        assert_eq!(part_size_for(1), MIN_PART_SIZE);
+        assert_eq!(
+            part_size_for((MIN_PART_SIZE as u64) * MAX_PARTS),
+            MIN_PART_SIZE
+        );
+    }
+
+    #[test]
+    fn part_size_grows_to_stay_under_s3_part_limit() {
+        let file_size = (MIN_PART_SIZE as u64) * MAX_PARTS + 1;
+        assert_eq!(part_size_for(file_size), MIN_PART_SIZE + 1);
+    }
 }
