@@ -102,15 +102,37 @@ impl WasapiClient {
             tokio::fs::create_dir_all(&dir).await?;
             let mut files = pin!(self.webdata(query));
             while let Some(file) = files.try_next().await? {
+                let file_for_error = file.clone();
                 let path = dir.join(&file.filename);
-                let expected_sha1 = self.required_sha1(&file)?;
-                if existing_sha1_matches(&path, expected_sha1).await? {
-                    yield DownloadOutcome::Skipped { file, path };
-                    continue;
+                if let Some(expected_sha1) = file.checksums.sha1.as_deref() {
+                    match existing_sha1_matches(&path, expected_sha1).await {
+                        Ok(true) => {
+                            yield DownloadOutcome::Skipped { file, path };
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            yield DownloadOutcome::Failed {
+                                file: file_for_error,
+                                error,
+                            };
+                            continue;
+                        }
+                    }
                 }
                 let mut inner = pin!(self.download_with_progress(file, path));
-                while let Some(event) = inner.try_next().await? {
-                    yield event;
+                loop {
+                    match inner.try_next().await {
+                        Ok(Some(event)) => yield event,
+                        Ok(None) => break,
+                        Err(error) => {
+                            yield DownloadOutcome::Failed {
+                                file: file_for_error,
+                                error,
+                            };
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -134,20 +156,26 @@ impl WasapiClient {
         async_stream::try_stream! {
             let url = self.primary_location_url(&file)?;
             let partial_path = partial_path(&path)?;
-            let expected_sha1 = self.required_sha1(&file)?;
+            let expected_sha1 = file.checksums.sha1.as_deref();
 
             let mut state = match prepare_partial_download(&partial_path, file.size).await? {
                 DownloadState::Complete { hasher } => {
-                    let actual_sha1 = format!("{:x}", hasher.finalize());
-                    if actual_sha1 != expected_sha1 {
-                        Err(Error::ChecksumMismatch {
-                            url: url.to_string(),
-                            expected: expected_sha1.to_owned(),
-                            actual: actual_sha1,
-                        })?;
+                    if let Some(expected_sha1) = expected_sha1 {
+                        let actual_sha1 = format!("{:x}", hasher.finalize());
+                        if actual_sha1 != expected_sha1 {
+                            Err(Error::ChecksumMismatch {
+                                url: url.to_string(),
+                                expected: expected_sha1.to_owned(),
+                                actual: actual_sha1,
+                            })?;
+                        }
                     }
                     tokio::fs::rename(&partial_path, &path).await?;
-                    yield DownloadOutcome::Downloaded { file, path };
+                    if expected_sha1.is_some() {
+                        yield DownloadOutcome::Downloaded { file, path };
+                    } else {
+                        yield DownloadOutcome::DownloadedUnverified { file, path };
+                    }
                     return;
                 }
                 DownloadState::InProgress(state) => state,
@@ -236,7 +264,11 @@ impl WasapiClient {
                     &url,
                 )
                 .await?;
-            yield DownloadOutcome::Downloaded { file, path };
+            if expected_sha1.is_some() {
+                yield DownloadOutcome::Downloaded { file, path };
+            } else {
+                yield DownloadOutcome::DownloadedUnverified { file, path };
+            }
         }
     }
 
@@ -286,16 +318,6 @@ impl WasapiClient {
                 })?;
         Ok(Url::parse(location)?)
     }
-
-    fn required_sha1<'a>(&self, file: &'a WasapiFile) -> Result<&'a str, Error> {
-        file.checksums
-            .sha1
-            .as_deref()
-            .ok_or_else(|| Error::MissingChecksum {
-                filename: file.filename.clone(),
-                algorithm: "sha1",
-            })
-    }
 }
 
 #[derive(Debug)]
@@ -303,6 +325,14 @@ pub enum DownloadOutcome {
     Downloaded {
         file: WasapiFile,
         path: PathBuf,
+    },
+    DownloadedUnverified {
+        file: WasapiFile,
+        path: PathBuf,
+    },
+    Failed {
+        file: WasapiFile,
+        error: Error,
     },
     Progress {
         file: WasapiFile,
@@ -353,7 +383,7 @@ impl PartialDownload {
         partial_path: &Path,
         final_path: &Path,
         expected_size: u64,
-        expected_sha1: &str,
+        expected_sha1: Option<&str>,
         url: &Url,
     ) -> Result<(), Error> {
         verify_and_finalize(
@@ -508,7 +538,7 @@ async fn verify_and_finalize(
     final_path: &Path,
     hasher: Sha1,
     expected_size: u64,
-    expected_sha1: &str,
+    expected_sha1: Option<&str>,
     url: &Url,
 ) -> Result<(), Error> {
     out.sync_all().await?;
@@ -521,13 +551,15 @@ async fn verify_and_finalize(
             actual: actual_size,
         });
     }
-    let actual_sha1 = format!("{:x}", hasher.finalize());
-    if actual_sha1 != expected_sha1 {
-        return Err(Error::ChecksumMismatch {
-            url: url.to_string(),
-            expected: expected_sha1.to_string(),
-            actual: actual_sha1,
-        });
+    if let Some(expected_sha1) = expected_sha1 {
+        let actual_sha1 = format!("{:x}", hasher.finalize());
+        if actual_sha1 != expected_sha1 {
+            return Err(Error::ChecksumMismatch {
+                url: url.to_string(),
+                expected: expected_sha1.to_string(),
+                actual: actual_sha1,
+            });
+        }
     }
     tokio::fs::rename(partial_path, final_path).await?;
     Ok(())

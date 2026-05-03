@@ -780,25 +780,99 @@ fn wasapi_file_json(f: &WasapiFile) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn download_requires_sha1_checksum() {
+async fn download_succeeds_without_sha1_checksum() {
     let server = MockServer::start().await;
-    let mut file = wasapi_file_at(&server, b"x");
+    let content = b"x";
+
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut file = wasapi_file_at(&server, content);
     file.checksums.sha1 = None;
 
     let dir = TempDir::new().unwrap();
     let out = dir.path().join("out.warc.gz");
-    let err = wasapi_download_client(&server)
+    wasapi_download_client(&server)
         .download(file, &out)
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(matches!(
-        err,
-        Error::MissingChecksum {
-            algorithm: "sha1",
+    assert_eq!(std::fs::read(&out).unwrap(), content);
+}
+
+#[tokio::test]
+async fn download_collection_emits_downloaded_unverified_and_continues() {
+    use futures::TryStreamExt;
+
+    let server = MockServer::start().await;
+    let mut missing = wasapi_file_at(&server, b"x");
+    missing.filename = "missing-sha1.warc.gz".into();
+    missing.checksums.sha1 = None;
+
+    let good_content = b"warc bytes";
+    let mut good = wasapi_file_at(&server, good_content);
+    good.filename = "good.warc.gz".into();
+    good.locations = vec![format!("{}/warcs/good.warc.gz", server.uri())];
+
+    Mock::given(method("GET"))
+        .and(path("/webdata"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "count": 2,
+            "next": null,
+            "previous": null,
+            "files": [wasapi_file_json(&missing), wasapi_file_json(&good)],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/warcs/foo.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"x".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/warcs/good.warc.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(good_content.to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let outcomes: Vec<_> = wasapi_download_client(&server)
+        .download_collection(
+            WebdataQuery {
+                collection: Some(4472),
+                ..Default::default()
+            },
+            dir.path(),
+        )
+        .try_collect()
+        .await
+        .unwrap();
+
+    assert!(outcomes.iter().any(|o| matches!(
+        o,
+        DownloadOutcome::DownloadedUnverified {
+            file,
             ..
-        }
-    ));
+        } if file.filename == "missing-sha1.warc.gz"
+    )));
+    assert!(outcomes.iter().any(|o| matches!(
+        o,
+        DownloadOutcome::Downloaded { file, .. } if file.filename == "good.warc.gz"
+    )));
+    assert_eq!(
+        std::fs::read(dir.path().join("missing-sha1.warc.gz")).unwrap(),
+        b"x"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("good.warc.gz")).unwrap(),
+        good_content
+    );
 }
 
 #[tokio::test]

@@ -37,6 +37,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("downloaded {} ({} bytes)", path.display(), file.size);
                 break;
             }
+            Some(DownloadOutcome::DownloadedUnverified { path, file }) => {
+                println!(
+                    "downloaded {} without verification ({})",
+                    path.display(),
+                    file.size
+                );
+                break;
+            }
+            Some(DownloadOutcome::Failed { file, error }) => {
+                println!("failed {}: {}", file.filename, error);
+                break;
+            }
             Some(DownloadOutcome::Skipped { path, .. }) => {
                 println!("skipped {} (already present)", path.display());
                 break;
