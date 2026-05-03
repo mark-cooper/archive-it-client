@@ -20,8 +20,8 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Renders a download destination for log lines.
 ///
-/// One impl per [`Sink::Location`] — keeps `DownloadOutcome` generic
-/// over destination while sharing a single `Display` impl.
+/// Implemented by location types used with `DownloadOutcome<L>`, such as
+/// local paths and S3 object locations.
 pub trait DownloadLocation: Send + 'static {
     fn fmt_location(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

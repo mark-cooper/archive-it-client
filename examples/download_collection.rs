@@ -26,8 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(outcome) = stream.try_next().await? {
         println!("{outcome}");
         // Example short-circuit: stop after the first file's terminal event
-        // (Downloaded / DownloadedUnverified / Skipped / Failed) so the demo
-        // doesn't pull the entire collection. Drop this break to download all.
+        // (Downloaded / Skipped / Failed) so the demo doesn't pull the entire
+        // collection. Drop this break to download all.
         if !matches!(outcome, DownloadOutcome::Progress { .. }) {
             break;
         }
