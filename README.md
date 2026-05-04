@@ -197,13 +197,6 @@ on the next invocation.
 
 ### S3
 
-Enable the `s3` feature:
-
-```toml
-[dependencies]
-archive-it-client = { version = "0.1", features = ["s3"] }
-```
-
 `WasapiClient::download_to_s3` and `download_collection_to_s3` accept a
 pre-built `aws_sdk_s3::Client`, so credentials, region, and HTTP wiring stay
 under your control. Multipart upload is driven internally with server-side
@@ -238,7 +231,7 @@ ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example download_c
 
 # upload one WARC to S3 (uses standard AWS provider chain for creds)
 ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass S3_BUCKET=my-bucket \
-    cargo run --features s3 --example download_s3
+    cargo run --example download_s3
 ```
 
 The authenticated examples fail fast if `ARCHIVE_IT_USERNAME` or

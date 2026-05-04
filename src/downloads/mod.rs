@@ -13,7 +13,6 @@ use crate::models::wasapi::WasapiFile;
 
 pub(crate) mod local;
 mod range;
-#[cfg(feature = "s3")]
 pub(crate) mod s3;
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
