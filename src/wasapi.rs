@@ -85,12 +85,20 @@ impl WasapiClient {
         self
     }
 
-    pub async fn download(&self, file: WasapiFile, path: impl AsRef<Path>) -> Result<(), Error> {
-        let url = self.primary_location_url(&file)?;
-        let sink = LocalSink::new(path.as_ref().to_path_buf())?;
-        let mut events = pin!(downloads::run_download(&self.transport, url, file, sink));
-        while events.try_next().await?.is_some() {}
-        Ok(())
+    pub fn download(
+        &self,
+        file: WasapiFile,
+        path: impl AsRef<Path>,
+    ) -> impl Stream<Item = Result<DownloadOutcome, Error>> + Send + '_ {
+        let path = path.as_ref().to_path_buf();
+        async_stream::try_stream! {
+            let url = self.primary_location_url(&file)?;
+            let sink = LocalSink::new(path)?;
+            let mut events = pin!(downloads::run_download(&self.transport, url, file, sink));
+            while let Some(event) = events.try_next().await? {
+                yield outcome_from(event);
+            }
+        }
     }
 
     pub fn download_collection(
@@ -137,17 +145,20 @@ impl WasapiClient {
         }
     }
 
-    pub async fn download_to_s3(
+    pub fn download_to_s3(
         &self,
         file: WasapiFile,
         s3: AwsS3Client,
         target: S3Location,
-    ) -> Result<(), Error> {
-        let url = self.primary_location_url(&file)?;
-        let sink = S3Sink::new(s3, target);
-        let mut events = pin!(downloads::run_download(&self.transport, url, file, sink));
-        while events.try_next().await?.is_some() {}
-        Ok(())
+    ) -> impl Stream<Item = Result<DownloadOutcome<S3Location>, Error>> + Send + '_ {
+        async_stream::try_stream! {
+            let url = self.primary_location_url(&file)?;
+            let sink = S3Sink::new(s3, target);
+            let mut events = pin!(downloads::run_download(&self.transport, url, file, sink));
+            while let Some(event) = events.try_next().await? {
+                yield outcome_from(event);
+            }
+        }
     }
 
     pub fn download_collection_to_s3<K>(

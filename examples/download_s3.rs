@@ -1,8 +1,9 @@
 use std::env;
+use std::io::{self, Write};
 use std::pin::pin;
 
 use archive_it_client::s3::S3Location;
-use archive_it_client::{WasapiClient, WebdataQuery};
+use archive_it_client::{DownloadOutcome, WasapiClient, WebdataQuery};
 use aws_config::BehaviorVersion;
 use futures::TryStreamExt;
 
@@ -50,8 +51,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "uploading {} ({} bytes) → s3://{bucket}/{key}",
         file.filename, file.size
     );
-    client.download_to_s3(file, s3, target).await?;
-    println!("done");
+
+    let mut stream = pin!(client.download_to_s3(file, s3, target));
+    let mut showed_progress = false;
+    while let Some(outcome) = stream.try_next().await? {
+        match &outcome {
+            DownloadOutcome::Progress { .. } => {
+                print!("\r\x1b[2K{outcome}");
+                io::stdout().flush()?;
+                showed_progress = true;
+            }
+            _ => {
+                if showed_progress {
+                    println!();
+                    showed_progress = false;
+                }
+                println!("{outcome}");
+            }
+        }
+    }
 
     Ok(())
 }

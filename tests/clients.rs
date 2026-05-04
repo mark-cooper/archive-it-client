@@ -1,3 +1,4 @@
+use std::pin::pin;
 use std::time::Duration;
 
 use archive_it_client::models::wasapi::{Checksums, WasapiFile};
@@ -5,6 +6,7 @@ use archive_it_client::{
     Config, DownloadOutcome, Error, PageOpts, PartnerClient, PublicClient, USER_AGENT,
     WasapiClient, WebdataQuery, sha1_hex,
 };
+use futures::{Stream, TryStreamExt};
 use serde_json::json;
 use sha1::{Digest, Sha1};
 use tempfile::TempDir;
@@ -19,6 +21,14 @@ fn config(server: &MockServer) -> Config {
     cfg.download_timeout = Duration::from_secs(2);
     cfg.backoff = Duration::from_millis(1);
     cfg
+}
+
+async fn drain_download<L>(
+    stream: impl Stream<Item = Result<DownloadOutcome<L>, Error>>,
+) -> Result<(), Error> {
+    let mut s = pin!(stream);
+    while s.try_next().await?.is_some() {}
+    Ok(())
 }
 
 fn full_account() -> serde_json::Value {
@@ -422,8 +432,7 @@ async fn download_writes_file_and_verifies_sha1() {
     let dir = TempDir::new().unwrap();
     let out = dir.path().join("out.warc.gz");
     let client = wasapi_download_client(&server);
-    client
-        .download(wasapi_file_at(&server, content), &out)
+    drain_download(client.download(wasapi_file_at(&server, content), &out))
         .await
         .unwrap();
 
@@ -447,8 +456,7 @@ async fn download_returns_size_mismatch() {
 
     let dir = TempDir::new().unwrap();
     let out = dir.path().join("out.warc.gz");
-    let err = wasapi_download_client(&server)
-        .download(file, &out)
+    let err = drain_download(wasapi_download_client(&server).download(file, &out))
         .await
         .unwrap_err();
 
@@ -479,8 +487,7 @@ async fn download_returns_checksum_mismatch() {
 
     let dir = TempDir::new().unwrap();
     let out = dir.path().join("out.warc.gz");
-    let err = wasapi_download_client(&server)
-        .download(file, &out)
+    let err = drain_download(wasapi_download_client(&server).download(file, &out))
         .await
         .unwrap_err();
 
@@ -513,8 +520,7 @@ async fn download_resumes_from_existing_partial() {
 
     let file = wasapi_file_at(&server, full);
     let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
-    wasapi_download_client(&server)
-        .download(file, &final_path)
+    drain_download(wasapi_download_client(&server).download(file, &final_path))
         .await
         .unwrap();
 
@@ -547,8 +553,7 @@ async fn download_rejects_resumed_response_with_mismatched_content_range_start()
 
     let file = wasapi_file_at(&server, full);
     let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
-    let err = wasapi_download_client(&server)
-        .download(file, &final_path)
+    let err = drain_download(wasapi_download_client(&server).download(file, &final_path))
         .await
         .unwrap_err();
 
@@ -578,8 +583,7 @@ async fn download_rejects_resumed_response_without_content_range() {
 
     let file = wasapi_file_at(&server, full);
     let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
-    let err = wasapi_download_client(&server)
-        .download(file, &final_path)
+    let err = drain_download(wasapi_download_client(&server).download(file, &final_path))
         .await
         .unwrap_err();
 
@@ -613,8 +617,7 @@ async fn download_rejects_resumed_response_with_mismatched_content_range_total()
 
     let file = wasapi_file_at(&server, full);
     let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
-    let err = wasapi_download_client(&server)
-        .download(file, &final_path)
+    let err = drain_download(wasapi_download_client(&server).download(file, &final_path))
         .await
         .unwrap_err();
 
@@ -642,8 +645,7 @@ async fn download_restarts_when_server_ignores_range() {
 
     let file = wasapi_file_at(&server, full);
     let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
-    wasapi_download_client(&server)
-        .download(file, &final_path)
+    drain_download(wasapi_download_client(&server).download(file, &final_path))
         .await
         .unwrap();
 
@@ -662,8 +664,7 @@ async fn download_finalizes_existing_complete_part_without_http() {
 
     let file = wasapi_file_at(&server, full);
     let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
-    wasapi_download_client(&server)
-        .download(file, &final_path)
+    drain_download(wasapi_download_client(&server).download(file, &final_path))
         .await
         .unwrap();
 
@@ -689,8 +690,7 @@ async fn download_errors_on_complete_part_with_wrong_sha1() {
 
     let file = wasapi_file_at(&server, expected);
     let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
-    let err = wasapi_download_client(&server)
-        .download(file, &final_path)
+    let err = drain_download(wasapi_download_client(&server).download(file, &final_path))
         .await
         .unwrap_err();
 
@@ -717,8 +717,7 @@ async fn download_restarts_when_part_is_oversized() {
 
     let file = wasapi_file_at(&server, full);
     let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
-    wasapi_download_client(&server)
-        .download(file, &final_path)
+    drain_download(wasapi_download_client(&server).download(file, &final_path))
         .await
         .unwrap();
 
@@ -733,8 +732,7 @@ async fn download_returns_primary_location_missing() {
 
     let dir = TempDir::new().unwrap();
     let out = dir.path().join("out.warc.gz");
-    let err = wasapi_download_client(&server)
-        .download(file, &out)
+    let err = drain_download(wasapi_download_client(&server).download(file, &out))
         .await
         .unwrap_err();
 
@@ -767,8 +765,7 @@ async fn download_skips_when_destination_already_matches_sha1() {
     let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
     std::fs::write(&final_path, content).unwrap();
 
-    wasapi_download_client(&server)
-        .download(file, &final_path)
+    drain_download(wasapi_download_client(&server).download(file, &final_path))
         .await
         .unwrap();
 
@@ -800,8 +797,7 @@ async fn download_overwrites_destination_when_sha1_differs() {
     let final_path = dir.path().join("ARCHIVEIT-1.warc.gz");
     std::fs::write(&final_path, stale_content).unwrap();
 
-    wasapi_download_client(&server)
-        .download(file, &final_path)
+    drain_download(wasapi_download_client(&server).download(file, &final_path))
         .await
         .unwrap();
 
@@ -825,8 +821,7 @@ async fn download_succeeds_without_sha1_checksum() {
 
     let dir = TempDir::new().unwrap();
     let out = dir.path().join("out.warc.gz");
-    wasapi_download_client(&server)
-        .download(file, &out)
+    drain_download(wasapi_download_client(&server).download(file, &out))
         .await
         .unwrap();
 
