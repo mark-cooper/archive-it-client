@@ -16,9 +16,8 @@
 //!
 //! # Skip rules
 //!
-//! Mirrors [`crate::downloads::local::LocalSink`]:
-//! - WASAPI sha1 is Some: skip when the existing object's metadata sha1
-//!   matches.
+//! - WASAPI sha1 is Some, object has metadata sha1: skip when they match.
+//! - WASAPI sha1 is Some, object lacks metadata sha1: fall back to size.
 //! - WASAPI sha1 is None: skip when the existing object's size matches
 //!   `file.size`. Without a checksum, size is the only cheap server-side
 //!   evidence that the upload would be redundant — re-uploading a
@@ -375,7 +374,10 @@ fn should_skip(
     existing: Option<&ExistingObject>,
 ) -> bool {
     match (wasapi_sha1, existing) {
-        (Some(expected), Some(obj)) => obj.sha1.as_deref() == Some(expected),
+        (Some(expected), Some(obj)) => match obj.sha1.as_deref() {
+            Some(s) => s == expected,
+            None => obj.size == file_size,
+        },
         (None, Some(obj)) => obj.size == file_size,
         _ => false,
     }
@@ -528,10 +530,19 @@ mod tests {
     }
 
     #[test]
-    fn should_not_skip_when_wasapi_has_sha1_but_object_lacks_metadata_sha1() {
+    fn should_skip_when_wasapi_has_sha1_object_lacks_sha1_and_sizes_match() {
         let existing = ExistingObject {
             sha1: None,
             size: 100,
+        };
+        assert!(should_skip(Some("abc"), 100, Some(&existing)));
+    }
+
+    #[test]
+    fn should_not_skip_when_wasapi_has_sha1_object_lacks_sha1_and_sizes_differ() {
+        let existing = ExistingObject {
+            sha1: None,
+            size: 99,
         };
         assert!(!should_skip(Some("abc"), 100, Some(&existing)));
     }
