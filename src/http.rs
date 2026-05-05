@@ -53,10 +53,11 @@ impl Transport {
         T: DeserializeOwned,
     {
         let url = self.base_url.join(path)?;
-        let resp = self
-            .get_response_with_query(&self.json_client, url, query, None)
-            .await?;
-        Ok(resp.json().await?)
+        self.retry(|| async {
+            let resp = self.attempt(&self.json_client, &url, query, None).await?;
+            Ok::<T, Error>(resp.json().await?)
+        })
+        .await
     }
 
     pub(crate) async fn get_response_range(
@@ -65,26 +66,21 @@ impl Transport {
         from: u64,
     ) -> Result<reqwest::Response, Error> {
         let range = if from > 0 { Some(from) } else { None };
-        self.get_response_with_query(&self.download_client, url, &(), range)
+        self.retry(|| self.attempt(&self.download_client, &url, &(), range))
             .await
     }
 
-    async fn get_response_with_query<Q>(
-        &self,
-        client: &reqwest::Client,
-        url: Url,
-        query: &Q,
-        range_from: Option<u64>,
-    ) -> Result<reqwest::Response, Error>
+    async fn retry<F, Fut, T>(&self, mut op: F) -> Result<T, Error>
     where
-        Q: Serialize + ?Sized,
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
     {
         let mut delay = self.backoff;
         let mut attempts_left = self.max_attempts;
 
         loop {
             attempts_left -= 1;
-            let result = self.attempt(client, &url, query, range_from).await;
+            let result = op().await;
 
             if attempts_left == 0 {
                 return result;
