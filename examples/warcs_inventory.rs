@@ -200,15 +200,15 @@ fn read_cache_state(path: &str) -> Result<(HashMap<u64, u64>, HashSet<String>), 
     let mut seen: HashSet<String> = HashSet::new();
     for record in rdr.records() {
         let record = record?;
-        if let Some(id_str) = record.get(COLLECTION_ID_COL) {
-            if let Ok(id) = id_str.parse::<u64>() {
-                *counts.entry(id).or_insert(0) += 1;
-            }
+        if let Some(id_str) = record.get(COLLECTION_ID_COL)
+            && let Ok(id) = id_str.parse::<u64>()
+        {
+            *counts.entry(id).or_insert(0) += 1;
         }
-        if let Some(filename) = record.get(FILENAME_COL) {
-            if !filename.is_empty() {
-                seen.insert(filename.to_owned());
-            }
+        if let Some(filename) = record.get(FILENAME_COL)
+            && !filename.is_empty()
+        {
+            seen.insert(filename.to_owned());
         }
     }
     Ok((counts, seen))
