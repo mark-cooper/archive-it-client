@@ -10,12 +10,12 @@ pub mod partner;
 pub mod public;
 pub mod wasapi;
 
-pub use downloads::DownloadLocation;
+pub use downloads::{DownloadLocation, DownloadOutcome};
 pub use error::Error;
 
 pub use partner::PartnerClient;
 pub use public::PublicClient;
-pub use wasapi::{DownloadOutcome, WasapiClient, WebdataQuery};
+pub use wasapi::{WasapiClient, WebdataQuery};
 
 /// User-facing types for the S3 download destination.
 ///

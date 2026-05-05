@@ -27,7 +27,11 @@ async fn drain_download<L>(
     stream: impl Stream<Item = Result<DownloadOutcome<L>, Error>>,
 ) -> Result<(), Error> {
     let mut s = pin!(stream);
-    while s.try_next().await?.is_some() {}
+    while let Some(outcome) = s.try_next().await? {
+        if let DownloadOutcome::Failed { error, .. } = outcome {
+            return Err(error);
+        }
+    }
     Ok(())
 }
 

@@ -163,8 +163,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Two destinations: local filesystem and S3. Both skip the fetch when the
 destination already matches — by sha1 when WASAPI supplied one, otherwise
 by file size. Every download method returns a `Stream` of `DownloadOutcome`
-events (`Progress` / `Downloaded` / `Skipped`, plus `Failed` for the
-collection variants), so callers can render progress and react per file.
+events — `Progress` / `Downloaded` / `Skipped` / `Failed` per file — so
+callers can render progress and react to per-file failures uniformly,
+whether they're downloading one file or a whole collection.
 
 ```rust,no_run
 use std::pin::pin;

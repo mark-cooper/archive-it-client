@@ -4,8 +4,39 @@ use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::Error;
-use crate::downloads::{Prepared, Sink};
+use crate::downloads::{Prepared, Sink, SinkFactory};
 use crate::models::wasapi::WasapiFile;
+
+/// Collection destination: writes each file to `dir/<filename>`. The caller
+/// is expected to have created `dir` before invoking the driver — destination
+/// preflight is not a per-file concern (a bad output path should fail the
+/// stream once, not once per file).
+pub(crate) struct LocalDir {
+    pub(crate) dir: PathBuf,
+}
+
+impl SinkFactory for LocalDir {
+    type Sink = LocalSink;
+    type Location = PathBuf;
+
+    async fn make(&mut self, file: &WasapiFile) -> Result<LocalSink, Error> {
+        LocalSink::new(self.dir.join(&file.filename))
+    }
+}
+
+/// Singular destination: writes one file to a fixed path.
+pub(crate) struct LocalPath {
+    pub(crate) path: PathBuf,
+}
+
+impl SinkFactory for LocalPath {
+    type Sink = LocalSink;
+    type Location = PathBuf;
+
+    async fn make(&mut self, _file: &WasapiFile) -> Result<LocalSink, Error> {
+        LocalSink::new(self.path.clone())
+    }
+}
 
 pub(crate) struct LocalSink {
     final_path: PathBuf,

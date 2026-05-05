@@ -57,8 +57,54 @@ use aws_sdk_s3::types::{ChecksumAlgorithm, CompletedMultipartUpload, CompletedPa
 use sha1::{Digest, Sha1};
 
 use crate::Error;
-use crate::downloads::{DownloadLocation, Prepared, Sink};
+use crate::downloads::{DownloadLocation, Prepared, Sink, SinkFactory};
 use crate::models::wasapi::WasapiFile;
+
+// TODO: consider making the minimum part size configurable via a builder on
+// `WasapiClient` or an `S3SinkConfig`. 8 MiB is a reasonable floor; S3's
+// minimum (except the last part) is 5 MiB.
+const MIN_PART_SIZE: usize = 8 * 1024 * 1024;
+const MAX_PARTS: u64 = 10_000;
+const SHA1_METADATA_KEY: &str = "sha1";
+
+/// Singular destination: uploads one file to a fixed `S3Location`.
+pub(crate) struct S3Single {
+    pub(crate) client: Client,
+    pub(crate) target: S3Location,
+}
+
+impl SinkFactory for S3Single {
+    type Sink = S3Sink;
+    type Location = S3Location;
+
+    async fn make(&mut self, _file: &WasapiFile) -> Result<S3Sink, Error> {
+        Ok(S3Sink::new(self.client.clone(), self.target.clone()))
+    }
+}
+
+/// Collection destination: uploads each file under `bucket` with a key
+/// derived from the file by `key_for`.
+pub(crate) struct S3Bucket<K> {
+    pub(crate) client: Client,
+    pub(crate) bucket: String,
+    pub(crate) key_for: K,
+}
+
+impl<K> SinkFactory for S3Bucket<K>
+where
+    K: FnMut(&WasapiFile) -> String + Send,
+{
+    type Sink = S3Sink;
+    type Location = S3Location;
+
+    async fn make(&mut self, file: &WasapiFile) -> Result<S3Sink, Error> {
+        let target = S3Location {
+            bucket: self.bucket.clone(),
+            key: (self.key_for)(file),
+        };
+        Ok(S3Sink::new(self.client.clone(), target))
+    }
+}
 
 /// Identifier for an object in S3.
 #[derive(Debug, Clone)]
@@ -78,13 +124,6 @@ impl fmt::Display for S3Location {
         self.fmt_location(f)
     }
 }
-
-// TODO: consider making the minimum part size configurable via a builder on
-// `WasapiClient` or an `S3SinkConfig`. 8 MiB is a reasonable floor; S3's
-// minimum (except the last part) is 5 MiB.
-const MIN_PART_SIZE: usize = 8 * 1024 * 1024;
-const MAX_PARTS: u64 = 10_000;
-const SHA1_METADATA_KEY: &str = "sha1";
 
 pub(crate) struct S3Sink {
     client: Client,

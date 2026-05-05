@@ -1,4 +1,3 @@
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 
@@ -6,11 +5,10 @@ use aws_sdk_s3::Client as AwsS3Client;
 use futures_core::Stream;
 use futures_util::TryStreamExt;
 use serde::Serialize;
-use url::Url;
 
-use crate::downloads::local::LocalSink;
-use crate::downloads::s3::{S3Location, S3Sink};
-use crate::downloads::{self, DownloadEvent, DownloadLocation};
+use crate::downloads::local::{LocalDir, LocalPath};
+use crate::downloads::s3::{S3Bucket, S3Location, S3Single};
+use crate::downloads::{self, DownloadOutcome};
 use crate::http::Transport;
 use crate::models::wasapi::{Page, WasapiFile};
 use crate::{Config, Error};
@@ -91,14 +89,13 @@ impl WasapiClient {
         path: impl AsRef<Path>,
     ) -> impl Stream<Item = Result<DownloadOutcome, Error>> + Send + '_ {
         let path = path.as_ref().to_path_buf();
-        async_stream::try_stream! {
-            let url = self.primary_location_url(&file)?;
-            let sink = LocalSink::new(path)?;
-            let mut events = pin!(downloads::run_download(&self.transport, url, file, sink));
-            while let Some(event) = events.try_next().await? {
-                yield outcome_from(event);
-            }
-        }
+        let files = async_stream::try_stream! { yield file; };
+        downloads::drive(
+            &self.transport,
+            &self.primary_location_src,
+            files,
+            LocalPath { path },
+        )
     }
 
     pub fn download_collection(
@@ -108,39 +105,19 @@ impl WasapiClient {
     ) -> impl Stream<Item = Result<DownloadOutcome, Error>> + Send + '_ {
         let dir = dir.into();
         async_stream::try_stream! {
+            // Preflight the destination once so a bad output path fails the
+            // stream upfront instead of yielding one Failed per file. Also
+            // ensures the directory exists when the collection is empty.
             tokio::fs::create_dir_all(&dir).await?;
-            let mut files = pin!(self.webdata(query));
-            while let Some(file) = files.try_next().await? {
-                let path = dir.join(&file.filename);
-                let sink = match LocalSink::new(path) {
-                    Ok(sink) => sink,
-                    Err(error) => {
-                        yield DownloadOutcome::Failed { file, error };
-                        continue;
-                    }
-                };
-                let url = match self.primary_location_url(&file) {
-                    Ok(url) => url,
-                    Err(error) => {
-                        yield DownloadOutcome::Failed { file, error };
-                        continue;
-                    }
-                };
-                let file_for_error = file.clone();
-                let mut events = pin!(downloads::run_download(&self.transport, url, file, sink));
-                loop {
-                    match events.try_next().await {
-                        Ok(Some(event)) => yield outcome_from(event),
-                        Ok(None) => break,
-                        Err(error) => {
-                            yield DownloadOutcome::Failed {
-                                file: file_for_error,
-                                error,
-                            };
-                            break;
-                        }
-                    }
-                }
+            let inner = downloads::drive(
+                &self.transport,
+                &self.primary_location_src,
+                self.webdata(query),
+                LocalDir { dir },
+            );
+            let mut inner = pin!(inner);
+            while let Some(outcome) = inner.try_next().await? {
+                yield outcome;
             }
         }
     }
@@ -151,14 +128,13 @@ impl WasapiClient {
         s3: AwsS3Client,
         target: S3Location,
     ) -> impl Stream<Item = Result<DownloadOutcome<S3Location>, Error>> + Send + '_ {
-        async_stream::try_stream! {
-            let url = self.primary_location_url(&file)?;
-            let sink = S3Sink::new(s3, target);
-            let mut events = pin!(downloads::run_download(&self.transport, url, file, sink));
-            while let Some(event) = events.try_next().await? {
-                yield outcome_from(event);
-            }
-        }
+        let files = async_stream::try_stream! { yield file; };
+        downloads::drive(
+            &self.transport,
+            &self.primary_location_src,
+            files,
+            S3Single { client: s3, target },
+        )
     }
 
     pub fn download_collection_to_s3<K>(
@@ -166,43 +142,21 @@ impl WasapiClient {
         query: WebdataQuery,
         s3: AwsS3Client,
         bucket: String,
-        mut key_for: K,
+        key_for: K,
     ) -> impl Stream<Item = Result<DownloadOutcome<S3Location>, Error>> + Send + '_
     where
         K: FnMut(&WasapiFile) -> String + Send + 'static,
     {
-        async_stream::try_stream! {
-            let mut files = pin!(self.webdata(query));
-            while let Some(file) = files.try_next().await? {
-                let target = S3Location {
-                    bucket: bucket.clone(),
-                    key: key_for(&file),
-                };
-                let sink = S3Sink::new(s3.clone(), target);
-                let url = match self.primary_location_url(&file) {
-                    Ok(url) => url,
-                    Err(error) => {
-                        yield DownloadOutcome::Failed { file, error };
-                        continue;
-                    }
-                };
-                let file_for_error = file.clone();
-                let mut events = pin!(downloads::run_download(&self.transport, url, file, sink));
-                loop {
-                    match events.try_next().await {
-                        Ok(Some(event)) => yield outcome_from(event),
-                        Ok(None) => break,
-                        Err(error) => {
-                            yield DownloadOutcome::Failed {
-                                file: file_for_error,
-                                error,
-                            };
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        downloads::drive(
+            &self.transport,
+            &self.primary_location_src,
+            self.webdata(query),
+            S3Bucket {
+                client: s3,
+                bucket,
+                key_for,
+            },
+        )
     }
 
     pub async fn list_webdata(&self, query: &WebdataQuery) -> Result<Page<WasapiFile>, Error> {
@@ -241,105 +195,6 @@ impl WasapiClient {
             .iter()
             .find(|location| location.starts_with(&self.primary_location_src))
             .map(String::as_str)
-    }
-
-    fn primary_location_url(&self, file: &WasapiFile) -> Result<Url, Error> {
-        let location =
-            self.primary_location(file)
-                .ok_or_else(|| Error::PrimaryLocationMissing {
-                    filename: file.filename.clone(),
-                })?;
-        Ok(Url::parse(location)?)
-    }
-}
-
-#[derive(Debug)]
-pub enum DownloadOutcome<L = PathBuf> {
-    Downloaded {
-        file: WasapiFile,
-        location: L,
-        verified: bool,
-    },
-    Failed {
-        file: WasapiFile,
-        error: Error,
-    },
-    Progress {
-        file: WasapiFile,
-        received: u64,
-        total: u64,
-    },
-    Skipped {
-        file: WasapiFile,
-        location: L,
-    },
-}
-
-impl<L: DownloadLocation> fmt::Display for DownloadOutcome<L> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Progress {
-                file,
-                received,
-                total,
-            } => {
-                let pct = if *total == 0 {
-                    100.0
-                } else {
-                    (*received as f64 / *total as f64) * 100.0
-                };
-                write!(
-                    f,
-                    "{}: {pct:.1}% ({received} / {total} bytes)",
-                    file.filename
-                )
-            }
-            Self::Downloaded {
-                file,
-                location,
-                verified,
-            } => {
-                write!(f, "downloaded ")?;
-                location.fmt_location(f)?;
-                if *verified {
-                    write!(f, " ({} bytes)", file.size)
-                } else {
-                    write!(f, " ({} bytes, unverified)", file.size)
-                }
-            }
-            Self::Failed { file, error } => {
-                write!(f, "failed {}: {error}", file.filename)
-            }
-            Self::Skipped { location, .. } => {
-                write!(f, "skipped ")?;
-                location.fmt_location(f)?;
-                write!(f, " (already present)")
-            }
-        }
-    }
-}
-
-fn outcome_from<L>(event: DownloadEvent<L>) -> DownloadOutcome<L> {
-    match event {
-        DownloadEvent::Progress {
-            file,
-            received,
-            total,
-        } => DownloadOutcome::Progress {
-            file,
-            received,
-            total,
-        },
-        DownloadEvent::Skipped { file, location } => DownloadOutcome::Skipped { file, location },
-        DownloadEvent::Downloaded {
-            file,
-            location,
-            verified,
-        } => DownloadOutcome::Downloaded {
-            file,
-            location,
-            verified,
-        },
     }
 }
 
