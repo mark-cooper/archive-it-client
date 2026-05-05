@@ -84,9 +84,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut page = wasapi.list_webdata(&query).await?;
         let total = page.count;
 
-        // First-page short-circuit: if we already have every WARC the API
-        // reports, drop the page without paginating the rest.
-        if total > 0 && cached >= total {
+        // First-page short-circuit: skip only when the cache is exactly in
+        // sync. Net-decrease (cached > total) means deletions on the API
+        // side, which can hide additions — paginate fully to catch them.
+        // (Aside: I don't know if this is a real concern)
+        if total > 0 && cached == total {
             collection_skipped += 1;
             cache_hit_count += cached;
             eprintln!(
@@ -94,6 +96,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 collection.id, collection.name, total
             );
             continue;
+        }
+
+        if cached > total {
+            eprintln!(
+                "collection {} ({}) -> cache has {} entries but API reports {} \
+                 (possible deletions); paginating fully to catch any additions",
+                collection.id, collection.name, cached, total
+            );
         }
 
         collection_count += 1;
@@ -113,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
+        let expected_new = total.saturating_sub(cached);
         let mut page_num = 0_u32;
         let mut written_in_collection = 0_u64;
         let mut cached_in_collection = 0_u64;
@@ -173,6 +184,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                  (collection {}/{} = {:.1}%)",
                 collection.id, page_num, written_this_page, cached_this_page, processed, total, pct
             );
+
+            // Inner short-circuit: once we've found at least the number of
+            // new files the API's count delta implies, stop paginating.
+            if expected_new > 0 && written_in_collection >= expected_new {
+                eprintln!(
+                    "  collection {} found {} new (≥ expected {}), stopping early",
+                    collection.id, written_in_collection, expected_new
+                );
+                break;
+            }
 
             match wasapi.list_webdata_next(&page).await? {
                 Some(next) => page = next,
