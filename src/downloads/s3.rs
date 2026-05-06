@@ -66,40 +66,25 @@ const MIN_PART_SIZE: usize = 8 * 1024 * 1024;
 const MAX_PARTS: u64 = 10_000;
 const SHA1_METADATA_KEY: &str = "sha1";
 
-/// Singular destination: uploads one file to a fixed `S3Location`.
-pub(crate) struct S3Single {
-    pub(crate) client: Client,
-    pub(crate) target: S3Location,
-}
-
-impl SinkFactory for S3Single {
-    type Sink = S3Sink;
-    type Location = S3Location;
-
-    async fn make(&mut self, _file: &WasapiFile) -> Result<S3Sink, Error> {
-        Ok(S3Sink::new(self.client.clone(), self.target.clone()))
-    }
-}
-
-/// Collection destination: uploads each file under `bucket` with a key
-/// derived from the file by `key_for`.
-pub(crate) struct S3Bucket<K> {
+/// Uploads each file to `bucket` under `{prefix}{file.filename}`.
+pub(crate) struct S3Dest {
     pub(crate) client: Client,
     pub(crate) bucket: String,
-    pub(crate) key_for: K,
+    pub(crate) prefix: Option<String>,
 }
 
-impl<K> SinkFactory for S3Bucket<K>
-where
-    K: FnMut(&WasapiFile) -> String + Send,
-{
+impl SinkFactory for S3Dest {
     type Sink = S3Sink;
     type Location = S3Location;
 
     async fn make(&mut self, file: &WasapiFile) -> Result<S3Sink, Error> {
+        let key = match &self.prefix {
+            Some(p) => format!("{p}{}", file.filename),
+            None => file.filename.clone(),
+        };
         let target = S3Location {
             bucket: self.bucket.clone(),
-            key: (self.key_for)(file),
+            key,
         };
         Ok(S3Sink::new(self.client.clone(), target))
     }

@@ -2,7 +2,6 @@ use std::env;
 use std::io::{self, Write};
 use std::pin::pin;
 
-use archive_it_client::s3::S3Location;
 use archive_it_client::{DownloadOutcome, WasapiClient, WebdataQuery};
 use aws_config::BehaviorVersion;
 use futures::TryStreamExt;
@@ -12,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user = env::var("ARCHIVE_IT_USERNAME").expect("ARCHIVE_IT_USERNAME env var must be set");
     let pass = env::var("ARCHIVE_IT_PASSWORD").expect("ARCHIVE_IT_PASSWORD env var must be set");
     let bucket = env::var("S3_BUCKET").expect("S3_BUCKET env var must be set");
-    let key_prefix = env::var("S3_KEY_PREFIX").unwrap_or_default();
+    let prefix = env::var("S3_KEY_PREFIX").ok().filter(|s| !s.is_empty());
     let collection: u64 = env::var("COLLECTION_ID")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -42,17 +41,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .ok_or("collection contains no files")?;
 
-    let key = format!("{key_prefix}{}", file.filename);
-    let target = S3Location {
-        bucket: bucket.clone(),
-        key: key.clone(),
+    let key = match &prefix {
+        Some(p) => format!("{p}{}", file.filename),
+        None => file.filename.clone(),
     };
     println!(
         "uploading {} ({} bytes) → s3://{bucket}/{key}",
         file.filename, file.size
     );
 
-    let mut stream = pin!(client.download_to_s3(file, s3, target));
+    let mut stream = pin!(client.download_to_s3(file, s3, bucket, prefix));
     let mut showed_progress = false;
     while let Some(outcome) = stream.try_next().await? {
         match &outcome {

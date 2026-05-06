@@ -7,7 +7,7 @@ use futures_util::TryStreamExt;
 use serde::Serialize;
 
 use crate::downloads::local::{LocalDir, LocalPath};
-use crate::downloads::s3::{S3Bucket, S3Location, S3Single};
+use crate::downloads::s3::{S3Dest, S3Location};
 use crate::downloads::{self, DownloadOutcome};
 use crate::http::Transport;
 use crate::models::wasapi::{Page, WasapiFile};
@@ -126,35 +126,37 @@ impl WasapiClient {
         &self,
         file: WasapiFile,
         s3: AwsS3Client,
-        target: S3Location,
+        bucket: impl Into<String>,
+        prefix: Option<String>,
     ) -> impl Stream<Item = Result<DownloadOutcome<S3Location>, Error>> + Send + '_ {
         let files = async_stream::try_stream! { yield file; };
         downloads::drive(
             &self.transport,
             &self.primary_location_src,
             files,
-            S3Single { client: s3, target },
+            S3Dest {
+                client: s3,
+                bucket: bucket.into(),
+                prefix,
+            },
         )
     }
 
-    pub fn download_collection_to_s3<K>(
+    pub fn download_collection_to_s3(
         &self,
         query: WebdataQuery,
         s3: AwsS3Client,
-        bucket: String,
-        key_for: K,
-    ) -> impl Stream<Item = Result<DownloadOutcome<S3Location>, Error>> + Send + '_
-    where
-        K: FnMut(&WasapiFile) -> String + Send + 'static,
-    {
+        bucket: impl Into<String>,
+        prefix: Option<String>,
+    ) -> impl Stream<Item = Result<DownloadOutcome<S3Location>, Error>> + Send + '_ {
         downloads::drive(
             &self.transport,
             &self.primary_location_src,
             self.webdata(query),
-            S3Bucket {
+            S3Dest {
                 client: s3,
-                bucket,
-                key_for,
+                bucket: bucket.into(),
+                prefix,
             },
         )
     }

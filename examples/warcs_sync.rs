@@ -11,7 +11,6 @@ use std::io::{self, Write};
 use std::pin::pin;
 
 use archive_it_client::models::wasapi::{Checksums, WasapiFile};
-use archive_it_client::s3::S3Location;
 use archive_it_client::{DownloadOutcome, Error, WasapiClient};
 use aws_config::BehaviorVersion;
 use csv::ReaderBuilder;
@@ -38,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user = env::var("ARCHIVE_IT_USERNAME").expect("ARCHIVE_IT_USERNAME env var must be set");
     let pass = env::var("ARCHIVE_IT_PASSWORD").expect("ARCHIVE_IT_PASSWORD env var must be set");
     let bucket = env::var("S3_BUCKET").expect("S3_BUCKET env var must be set");
-    let key_prefix = env::var("S3_KEY_PREFIX").unwrap_or_default();
+    let prefix = env::var("S3_KEY_PREFIX").ok().filter(|s| !s.is_empty());
 
     let aws_cfg = aws_config::defaults(BehaviorVersion::latest()).load().await;
     let s3 = aws_sdk_s3::Client::new(&aws_cfg);
@@ -63,17 +62,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
-        let key = format!("{key_prefix}{}", file.filename);
-        let target = S3Location {
-            bucket: bucket.clone(),
-            key: key.clone(),
+        let key = match &prefix {
+            Some(p) => format!("{p}{}", file.filename),
+            None => file.filename.clone(),
         };
         eprintln!(
             "→ s3://{bucket}/{key} ({} bytes, sha1={:?})",
             file.size, file.checksums.sha1
         );
 
-        let mut stream = pin!(client.download_to_s3(file, s3.clone(), target));
+        let mut stream =
+            pin!(client.download_to_s3(file, s3.clone(), bucket.clone(), prefix.clone()));
         let mut showed_progress = false;
         loop {
             match stream.try_next().await {

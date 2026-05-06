@@ -21,8 +21,9 @@ pub use wasapi::{WasapiClient, WebdataQuery};
 ///
 /// Construct an [`aws_sdk_s3::Client`] and pass it to
 /// [`WasapiClient::download_to_s3`] or
-/// [`WasapiClient::download_collection_to_s3`] alongside an
-/// [`S3Location`](s3::S3Location).
+/// [`WasapiClient::download_collection_to_s3`] alongside a bucket and
+/// optional key prefix. Each upload's resolved [`S3Location`](s3::S3Location)
+/// is reported back via `DownloadOutcome`.
 pub mod s3 {
     pub use crate::downloads::s3::S3Location;
 }
