@@ -1,9 +1,10 @@
 // Re-download the rows captured by `warcs_audit.rs` into S3.
 //
-// Reads `warcs_not_found.csv` (same schema as `warcs.csv`), reconstructs a
-// `WasapiFile` per row, and drives `download_to_s3` for each. The S3 sink's
-// HEAD-then-skip in `prepare()` makes this naturally idempotent — re-runs
-// skip anything already uploaded.
+// Reads `warcs_sync.csv` (same schema as `warcs.csv`) — both not-found and
+// unmatched rows from the audit — reconstructs a `WasapiFile` per row, and
+// drives `download_to_s3` for each. The S3 sink's HEAD-then-skip in
+// `prepare()` makes this naturally idempotent — re-runs skip anything
+// already uploaded, and unmatched objects get overwritten on re-upload.
 
 use std::env;
 use std::io::{self, Write};
@@ -16,7 +17,7 @@ use aws_config::BehaviorVersion;
 use csv::ReaderBuilder;
 use futures::TryStreamExt;
 
-const NOT_FOUND_PATH: &str = "warcs_not_found.csv";
+const SYNC_PATH: &str = "warcs_sync.csv";
 
 // Column indices match `warcs_inventory.rs`'s HEADER order.
 const COLLECTION_ID_COL: usize = 0;
@@ -45,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
-        .from_path(NOT_FOUND_PATH)?;
+        .from_path(SYNC_PATH)?;
 
     let mut uploaded = 0_u64;
     let mut skipped = 0_u64;
