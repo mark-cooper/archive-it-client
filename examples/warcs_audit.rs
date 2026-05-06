@@ -154,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
 
         done += 1;
-        if done % PROGRESS_EVERY == 0 {
+        if done.is_multiple_of(PROGRESS_EVERY) {
             eprintln!(
                 "[{done}] sha1={matched_sha1} size={matched_size} \
                  unmatched={unmatched} not_found={not_found} errored={errored}"
