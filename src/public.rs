@@ -60,18 +60,15 @@ impl PublicClient {
 pub(crate) struct CollectionsQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) account: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) limit: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) offset: Option<u32>,
+    #[serde(flatten)]
+    pub(crate) page: PageOpts,
 }
 
 impl CollectionsQuery {
     pub(crate) fn new(account: Option<u64>, opts: PageOpts) -> Self {
         Self {
             account,
-            limit: opts.limit,
-            offset: opts.offset,
+            page: opts,
         }
     }
 }
