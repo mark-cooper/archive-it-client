@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+use std::fmt::Write;
 use std::time::Duration;
 
 mod downloads;
@@ -31,11 +32,12 @@ pub mod s3 {
 pub const USER_AGENT: &str = concat!("Archive-It-Client (", env!("CARGO_PKG_VERSION"), ")");
 
 pub fn sha1_hex(bytes: impl AsRef<[u8]>) -> String {
-    bytes
-        .as_ref()
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect()
+    let bytes = bytes.as_ref();
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(&mut hex, "{b:02x}").expect("writing to String cannot fail");
+    }
+    hex
 }
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
