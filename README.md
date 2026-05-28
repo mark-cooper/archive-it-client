@@ -223,24 +223,27 @@ Runnable examples live under `examples/`:
 # no auth — public partner registry
 cargo run --example public
 
-# partner API — needs ARCHIVE_IT_USERNAME/ARCHIVE_IT_PASSWORD set
-ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example partner
+# authenticated examples
+export ARCHIVE_IT_USERNAME=user
+export ARCHIVE_IT_PASSWORD=pass
 
-# wasapi — needs ARCHIVE_IT_USERNAME/ARCHIVE_IT_PASSWORD set
-ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example wasapi
+# partner API
+cargo run --example partner
+
+# wasapi
+cargo run --example wasapi
 
 # inventory every WARC exposed by WASAPI into ./warcs.csv
-ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example warcs_inventory
+cargo run --example warcs_inventory
 
 # tally total WARC bytes across every collection on the account
-ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example count_bytes
+cargo run --example count_bytes
 
 # download a collection to ./warcs (resumes via .part sidecars)
-ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass cargo run --example download_collection
+cargo run --example download_collection
 
 # upload one WARC to S3 (uses standard AWS provider chain for creds)
-ARCHIVE_IT_USERNAME=user ARCHIVE_IT_PASSWORD=pass S3_BUCKET=my-bucket \
-    cargo run --example download_s3
+S3_BUCKET=my-bucket cargo run --example download_s3
 ```
 
 The authenticated examples fail fast if `ARCHIVE_IT_USERNAME` or
