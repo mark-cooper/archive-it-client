@@ -21,8 +21,8 @@ mod range;
 pub mod s3;
 
 pub use error::Error;
-pub use http::Downloader;
 use http::is_retryable;
+pub use http::{Downloader, DownloaderBuilder};
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -104,19 +104,45 @@ fn to_hex(bytes: &[u8]) -> String {
     hex
 }
 
-/// One unit of work for the engine. `meta` is the caller's own item type,
-/// carried opaquely and handed straight back via [`Outcome`]; the engine reads
-/// only `size`, `checksum`, and `name`.
-pub struct Transfer<M> {
+/// Describes a caller's work item to the engine: its destination `name`, byte
+/// `size`, and optional `checksum`. The item value itself is cloned into
+/// `Progress` events and handed back in terminal [`Outcome`]s. `name` is also
+/// the item's label in [`Outcome`]'s `Display`.
+pub trait Source: Clone + Send + 'static {
+    fn name(&self) -> &str;
+    fn size(&self) -> u64;
+    fn checksum(&self) -> Option<Checksum> {
+        None
+    }
+}
+
+/// A simple URL-bearing work item for callers that already know where each file
+/// lives. Use with [`drive_downloads`] when no per-item resolver is needed.
+#[derive(Debug, Clone)]
+pub struct Download {
+    pub url: Url,
     pub size: u64,
     pub checksum: Option<Checksum>,
     pub name: String,
-    pub meta: M,
 }
 
-/// Borrowed view of a [`Transfer`] handed to sinks at prepare time. The source
-/// URL is resolved by the engine and `meta` is the caller's concern, so neither
-/// appears here — sinks are domain-agnostic.
+impl Source for Download {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn checksum(&self) -> Option<Checksum> {
+        self.checksum.clone()
+    }
+}
+
+/// Borrowed view of a [`Source`] item handed to sinks at prepare time. The
+/// source URL is resolved by the engine and the caller's item is its own
+/// concern, so neither appears here — sinks are domain-agnostic.
 #[derive(Clone, Copy)]
 pub struct Target<'a> {
     pub name: &'a str,
@@ -171,13 +197,6 @@ impl DownloadLocation for String {
     }
 }
 
-/// Short label for a transfer item (e.g. a filename), used by [`Outcome`]'s
-/// `Display` impl to render log lines. Implement it on your `meta` type `M` to
-/// get `Display` for the outcomes carrying it.
-pub trait Label {
-    fn label(&self) -> &str;
-}
-
 /// Per-item outcome of a transfer stream, generic over the caller's item type
 /// `M`. `Failed` carries per-item errors so a single bad item in a batch
 /// doesn't tear down the whole stream. `StreamFailed` carries errors that
@@ -208,7 +227,7 @@ pub enum Outcome<M, L = PathBuf> {
     },
 }
 
-impl<M: Label, L: DownloadLocation> fmt::Display for Outcome<M, L> {
+impl<M: Source, L: DownloadLocation> fmt::Display for Outcome<M, L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Progress {
@@ -221,11 +240,7 @@ impl<M: Label, L: DownloadLocation> fmt::Display for Outcome<M, L> {
                 } else {
                     (*received as f64 / *total as f64) * 100.0
                 };
-                write!(
-                    f,
-                    "{}: {pct:.1}% ({received} / {total} bytes)",
-                    file.label()
-                )
+                write!(f, "{}: {pct:.1}% ({received} / {total} bytes)", file.name())
             }
             Self::Downloaded {
                 location, verified, ..
@@ -238,7 +253,7 @@ impl<M: Label, L: DownloadLocation> fmt::Display for Outcome<M, L> {
                     if *verified { "verified" } else { "unverified" }
                 )
             }
-            Self::Failed { file, error } => write!(f, "failed {}: {error}", file.label()),
+            Self::Failed { file, error } => write!(f, "failed {}: {error}", file.name()),
             Self::Skipped { location, .. } => {
                 write!(f, "skipped ")?;
                 location.fmt_location(f)?;
@@ -265,55 +280,56 @@ pub enum Prepared<L> {
 /// one-element input stream therefore yields exactly one terminal outcome.
 pub fn drive<'a, M, F, R>(
     http: &'a Downloader,
-    items: impl Stream<Item = Result<Transfer<M>, Error>> + Send + 'a,
+    items: impl Stream<Item = Result<M, Error>> + Send + 'a,
     mut resolve: R,
     factory: F,
 ) -> impl Stream<Item = Outcome<M, F::Location>> + Send + 'a
 where
-    M: Clone + Send + 'static,
+    M: Source,
     F: SinkFactory + 'a,
-    R: FnMut(&Transfer<M>) -> Result<Url, Error> + Send + 'a,
+    R: FnMut(&M) -> Result<Url, Error> + Send + 'a,
 {
     async_stream::stream! {
         let mut factory = factory;
         let mut items = pin!(items);
         loop {
-            let transfer = match items.try_next().await {
-                Ok(Some(transfer)) => transfer,
+            let item = match items.try_next().await {
+                Ok(Some(item)) => item,
                 Ok(None) => break,
                 Err(error) => {
                     yield Outcome::StreamFailed { error };
                     return;
                 }
             };
-            let url = match resolve(&transfer) {
+            let url = match resolve(&item) {
                 Ok(u) => u,
                 Err(error) => {
-                    yield Outcome::Failed { file: transfer.meta, error };
+                    yield Outcome::Failed { file: item, error };
                     continue;
                 }
             };
+            let checksum = item.checksum();
             let target = Target {
-                name: &transfer.name,
-                size: transfer.size,
-                checksum: transfer.checksum.as_ref(),
+                name: item.name(),
+                size: item.size(),
+                checksum: checksum.as_ref(),
             };
             let sink = match factory.make(target).await {
                 Ok(s) => s,
                 Err(error) => {
-                    yield Outcome::Failed { file: transfer.meta, error };
+                    yield Outcome::Failed { file: item, error };
                     continue;
                 }
             };
-            let meta_for_err = transfer.meta.clone();
-            let mut events = pin!(run_download(http, url, transfer, sink));
+            let item_for_err = item.clone();
+            let mut events = pin!(run_download(http, url, item, sink));
             loop {
                 match events.try_next().await {
                     Ok(Some(outcome)) => yield outcome,
                     Ok(None) => break,
                     Err(error) => {
                         yield Outcome::Failed {
-                            file: meta_for_err,
+                            file: item_for_err,
                             error,
                         };
                         break;
@@ -324,6 +340,19 @@ where
     }
 }
 
+/// Simpler driver for transfers whose source URL is already known. For
+/// domain-specific items that need fallible URL resolution, use [`drive`].
+pub fn drive_downloads<'a, F>(
+    http: &'a Downloader,
+    items: impl Stream<Item = Result<Download, Error>> + Send + 'a,
+    factory: F,
+) -> impl Stream<Item = Outcome<Download, F::Location>> + Send + 'a
+where
+    F: SinkFactory + 'a,
+{
+    drive(http, items, |download| Ok(download.url.clone()), factory)
+}
+
 /// Streams one item's download. Only emits the happy-path `Outcome` variants
 /// (`Progress`, `Skipped`, `Downloaded`); per-item faults bubble out as `Err`
 /// and `drive` turns them into `Failed`. `StreamFailed` is never produced
@@ -331,26 +360,28 @@ where
 pub fn run_download<M, S>(
     http: &Downloader,
     url: Url,
-    transfer: Transfer<M>,
+    item: M,
     sink: S,
 ) -> impl Stream<Item = Result<Outcome<M, S::Location>, Error>> + Send + '_
 where
-    M: Clone + Send + 'static,
+    M: Source,
     S: Sink + Send + 'static,
 {
     async_stream::try_stream! {
         let mut sink = sink;
+        let size = item.size();
+        let checksum = item.checksum();
 
         let (mut received, mut hasher) = match sink
             .prepare(Target {
-                name: &transfer.name,
-                size: transfer.size,
-                checksum: transfer.checksum.as_ref(),
+                name: item.name(),
+                size,
+                checksum: checksum.as_ref(),
             })
             .await?
         {
             Prepared::Skip { location } => {
-                yield Outcome::Skipped { file: transfer.meta, location };
+                yield Outcome::Skipped { file: item, location };
                 return;
             }
             Prepared::Resume { received, partial } => (received, partial),
@@ -360,16 +391,16 @@ where
         let mut attempts_left = http.max_attempts();
         let mut delay = http.backoff();
 
-        if received > 0 && received < transfer.size {
+        if received > 0 && received < size {
             yield Outcome::Progress {
-                file: transfer.meta.clone(),
+                file: item.clone(),
                 received,
-                total: transfer.size,
+                total: size,
             };
             last_progress = Some(Instant::now());
         }
 
-        'download: while received < transfer.size {
+        'download: while received < size {
             let mut response = http.get_response_range(url.clone(), received).await?;
 
             if received > 0 {
@@ -377,12 +408,12 @@ where
                     reqwest::StatusCode::OK => {
                         sink.restart().await?;
                         received = 0;
-                        hasher = Hasher::for_checksum(transfer.checksum.as_ref());
+                        hasher = Hasher::for_checksum(checksum.as_ref());
                         attempts_left = http.max_attempts();
                         delay = http.backoff();
                     }
                     reqwest::StatusCode::PARTIAL_CONTENT => {
-                        range::validate_content_range(&response, received, transfer.size, &url)?;
+                        range::validate_content_range(&response, received, size, &url)?;
                     }
                     status => {
                         Err(Error::InvalidRangeResponse {
@@ -422,24 +453,24 @@ where
                 };
                 if emit {
                     yield Outcome::Progress {
-                        file: transfer.meta.clone(),
+                        file: item.clone(),
                         received,
-                        total: transfer.size,
+                        total: size,
                     };
                     last_progress = Some(Instant::now());
                 }
             }
         }
 
-        if received != transfer.size {
+        if received != size {
             Err(Error::SizeMismatch {
                 url: url.to_string(),
-                expected: transfer.size,
+                expected: size,
                 actual: received,
             })?;
         }
 
-        let verified = match (transfer.checksum.as_ref(), hasher.finalize_hex()) {
+        let verified = match (checksum.as_ref(), hasher.finalize_hex()) {
             (Some(expected), Some(actual)) => {
                 if actual != expected.hex() {
                     Err(Error::ChecksumMismatch {
@@ -455,6 +486,6 @@ where
         };
 
         let location = sink.finalize().await?;
-        yield Outcome::Downloaded { file: transfer.meta, location, verified };
+        yield Outcome::Downloaded { file: item, location, verified };
     }
 }

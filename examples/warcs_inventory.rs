@@ -100,7 +100,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // First-page short-circuit: skip only when the cache is exactly in
         // sync. Net-decrease (cached > total) means deletions on the API
         // side, which can hide additions — paginate fully to catch them.
-        // (Aside: I don't know if this is a real concern)
         if total > 0 && cached == total {
             collection_skipped += 1;
             cache_hit_count += cached;

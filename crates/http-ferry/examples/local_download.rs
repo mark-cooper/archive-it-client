@@ -4,20 +4,8 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use http_ferry::local::LocalDir;
-use http_ferry::{Checksum, Downloader, Error as FerryError, Label, Outcome, Transfer};
+use http_ferry::{Checksum, Download, Downloader, Outcome};
 use url::Url;
-
-#[derive(Clone)]
-struct SourceFile {
-    url: Url,
-    name: String,
-}
-
-impl Label for SourceFile {
-    fn label(&self) -> &str {
-        &self.name
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -31,18 +19,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let client = reqwest::Client::builder().build()?;
-    let transfer = source_file(&client, url, checksum).await?;
-    let downloader = Downloader::new(client, 3, Duration::from_millis(250), |request| request);
-    let items = futures_util::stream::iter([Ok(transfer)]);
+    let download = source_file(&client, url, checksum).await?;
+    let downloader = Downloader::builder(client)
+        .max_attempts(3)
+        .backoff(Duration::from_millis(250))
+        .build();
+    let items = futures_util::stream::iter([Ok(download)]);
     let destination = LocalDir::create_all(output_dir)?;
 
     let mut last_received = 0;
-    let mut outcomes = std::pin::pin!(http_ferry::drive(
-        &downloader,
-        items,
-        |transfer: &Transfer<SourceFile>| Ok::<_, FerryError>(transfer.meta.url.clone()),
-        destination,
-    ));
+    let outcomes = http_ferry::drive_downloads(&downloader, items, destination);
+    let mut outcomes = std::pin::pin!(outcomes);
 
     while let Some(outcome) = outcomes.next().await {
         match outcome {
@@ -86,18 +73,18 @@ async fn source_file(
     client: &reqwest::Client,
     url: Url,
     checksum: Checksum,
-) -> Result<Transfer<SourceFile>, Box<dyn Error>> {
+) -> Result<Download, Box<dyn Error>> {
     let response = client.head(url.clone()).send().await?.error_for_status()?;
     let size = response
         .content_length()
         .ok_or("source did not provide a Content-Length header")?;
     let name = file_name(&url)?.to_owned();
 
-    Ok(Transfer {
+    Ok(Download {
+        url,
         size,
         checksum: Some(checksum),
-        name: name.clone(),
-        meta: SourceFile { url, name },
+        name,
     })
 }
 

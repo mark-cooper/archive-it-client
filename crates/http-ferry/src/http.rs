@@ -24,19 +24,18 @@ pub struct Downloader {
     customize: Arc<Customize>,
 }
 
+/// Builder for [`Downloader`]. Settings are applied to the wrapped
+/// `Downloader`, which `build` returns.
+pub struct DownloaderBuilder(Downloader);
+
 impl Downloader {
-    pub fn new(
-        client: reqwest::Client,
-        max_attempts: u32,
-        backoff: Duration,
-        customize: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder + Send + Sync + 'static,
-    ) -> Self {
-        Self {
+    pub fn builder(client: reqwest::Client) -> DownloaderBuilder {
+        DownloaderBuilder(Downloader {
             client,
-            max_attempts: max_attempts.max(1),
-            backoff,
-            customize: Arc::new(customize),
-        }
+            max_attempts: 3,
+            backoff: Duration::from_millis(250),
+            customize: Arc::new(identity),
+        })
     }
 
     pub(crate) fn backoff(&self) -> Duration {
@@ -102,6 +101,34 @@ impl Downloader {
         }
         Ok(resp)
     }
+}
+
+impl DownloaderBuilder {
+    pub fn max_attempts(mut self, max_attempts: u32) -> Self {
+        self.0.max_attempts = max_attempts.max(1);
+        self
+    }
+
+    pub fn backoff(mut self, backoff: Duration) -> Self {
+        self.0.backoff = backoff;
+        self
+    }
+
+    pub fn customize_request(
+        mut self,
+        customize: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder + Send + Sync + 'static,
+    ) -> Self {
+        self.0.customize = Arc::new(customize);
+        self
+    }
+
+    pub fn build(self) -> Downloader {
+        self.0
+    }
+}
+
+fn identity(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    req
 }
 
 pub(crate) fn is_retryable(err: &Error) -> bool {

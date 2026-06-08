@@ -1,4 +1,4 @@
-use http_ferry::Label;
+use http_ferry::{Checksum, Source};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -29,10 +29,21 @@ pub struct WasapiFile {
     pub locations: Vec<String>,
 }
 
-/// Gives the engine a label (the filename) for `DownloadOutcome`'s `Display`.
-impl Label for WasapiFile {
-    fn label(&self) -> &str {
+/// Projects a WASAPI file onto the fields the engine needs. The filename
+/// doubles as the label in `DownloadOutcome`'s `Display`. WASAPI supplies a
+/// sha1 (md5 is an empty placeholder in practice and ignored), so only sha1 is
+/// surfaced as the expected checksum.
+impl Source for WasapiFile {
+    fn name(&self) -> &str {
         &self.filename
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn checksum(&self) -> Option<Checksum> {
+        self.checksums.sha1.clone().map(Checksum::Sha1)
     }
 }
 

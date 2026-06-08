@@ -116,9 +116,9 @@ where
     }
 }
 
-// Retry classification for the API transport. Intentionally a local copy rather
-// than a shared import from `transfer`: the JSON API layer must not depend on
-// the (extraction-candidate) transfer engine.
+// Retry classification for the API transport. Kept local rather than shared
+// with `http-ferry` so the JSON API layer does not depend on the transfer
+// engine.
 fn is_retryable(err: &Error) -> bool {
     match err {
         Error::Request(e) => e.is_timeout() || e.is_connect(),

@@ -4,9 +4,9 @@ use std::pin::pin;
 use aws_sdk_s3::Client as AwsS3Client;
 use futures_core::Stream;
 use futures_util::{StreamExt, TryStreamExt};
+use http_ferry::Downloader;
 use http_ferry::local::{LocalDir, LocalPath};
 use http_ferry::s3::{S3Dest, S3Location};
-use http_ferry::{Checksum, Downloader, Transfer};
 use serde::Serialize;
 use url::Url;
 
@@ -80,10 +80,11 @@ impl WasapiClient {
             .user_agent(USER_AGENT)
             .read_timeout(cfg.download_timeout)
             .build()?;
-        let downloader =
-            Downloader::new(download_client, cfg.max_attempts, cfg.backoff, move |req| {
-                req.basic_auth(&creds.0, Some(&creds.1))
-            });
+        let downloader = Downloader::builder(download_client)
+            .max_attempts(cfg.max_attempts)
+            .backoff(cfg.backoff)
+            .customize_request(move |req| req.basic_auth(&creds.0, Some(&creds.1)))
+            .build();
         Ok(Self {
             transport,
             downloader,
@@ -104,7 +105,7 @@ impl WasapiClient {
         let path = path.as_ref().to_path_buf();
         http_ferry::drive(
             &self.downloader,
-            single_file(file).map_ok(to_transfer).map_err(to_ferry),
+            single_file(file).map_err(to_ferry),
             self.resolver(),
             LocalPath { path },
         )
@@ -128,7 +129,7 @@ impl WasapiClient {
             }
             let inner = http_ferry::drive(
                 &self.downloader,
-                self.webdata(query).map_ok(to_transfer).map_err(to_ferry),
+                self.webdata(query).map_err(to_ferry),
                 self.resolver(),
                 LocalDir { dir },
             );
@@ -148,7 +149,7 @@ impl WasapiClient {
     ) -> impl Stream<Item = DownloadOutcome<S3Location>> + Send + '_ {
         http_ferry::drive(
             &self.downloader,
-            single_file(file).map_ok(to_transfer).map_err(to_ferry),
+            single_file(file).map_err(to_ferry),
             self.resolver(),
             S3Dest {
                 client: s3,
@@ -167,7 +168,7 @@ impl WasapiClient {
     ) -> impl Stream<Item = DownloadOutcome<S3Location>> + Send + '_ {
         http_ferry::drive(
             &self.downloader,
-            self.webdata(query).map_ok(to_transfer).map_err(to_ferry),
+            self.webdata(query).map_err(to_ferry),
             self.resolver(),
             S3Dest {
                 client: s3,
@@ -219,11 +220,9 @@ impl WasapiClient {
     /// in-loop inside the engine so a file with no primary location yields a
     /// non-fatal `Failed` rather than tearing down the stream. Host errors are
     /// mapped into the engine's error type via [`to_ferry`].
-    fn resolver(
-        &self,
-    ) -> impl FnMut(&Transfer<WasapiFile>) -> Result<Url, http_ferry::Error> + Send + '_ {
+    fn resolver(&self) -> impl FnMut(&WasapiFile) -> Result<Url, http_ferry::Error> + Send + '_ {
         let primary = self.primary_location_src.as_str();
-        move |transfer| primary_location_url(primary, &transfer.meta).map_err(to_ferry)
+        move |file| primary_location_url(primary, file).map_err(to_ferry)
     }
 }
 
@@ -258,19 +257,6 @@ fn to_ferry(err: Error) -> http_ferry::Error {
         Error::Status(s) => F::Status(s),
         Error::NotFound(s) => F::NotFound(s),
         other => F::from_source(other),
-    }
-}
-
-/// Map a WASAPI file onto the engine's transfer request. WASAPI supplies a
-/// sha1 (md5 is an empty placeholder in practice and ignored), so only sha1 is
-/// surfaced as the expected checksum; the original file rides along as `meta`.
-fn to_transfer(file: WasapiFile) -> Transfer<WasapiFile> {
-    let checksum = file.checksums.sha1.clone().map(Checksum::Sha1);
-    Transfer {
-        size: file.size,
-        checksum,
-        name: file.filename.clone(),
-        meta: file,
     }
 }
 

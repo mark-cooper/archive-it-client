@@ -6,17 +6,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::{Checksum, Error, Hasher, Prepared, Sink, SinkFactory, Target};
 
 /// Collection destination: writes each file to `dir/<name>`. `dir` must already
-/// exist before driving — destination preflight is not a per-item concern (a bad
-/// output path should fail the stream once, not once per file). Use
-/// [`LocalDir::create_all`] to create it up front.
+/// exist before driving, so a bad output path fails the stream once rather than
+/// once per file; use [`LocalDir::create_all`] to create it up front.
 pub struct LocalDir {
     pub dir: PathBuf,
 }
 
 impl LocalDir {
-    /// Build a `LocalDir`, creating `dir` (and parents) first. A cheap one-time
-    /// synchronous preflight (a single `std::fs::create_dir_all`); fine to call
-    /// from async setup code before entering the transfer loop.
+    /// Build a `LocalDir`, creating `dir` (and parents) first with a blocking
+    /// `std::fs::create_dir_all`. Call it during setup, not inside the transfer
+    /// loop.
     pub fn create_all(dir: impl Into<PathBuf>) -> std::io::Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
